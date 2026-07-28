@@ -1,0 +1,12 @@
+# Build output
+/tuitime
+/bin/
+
+# Local environment files
+.env
+.env.*
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
