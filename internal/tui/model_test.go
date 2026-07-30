@@ -440,6 +440,21 @@ func TestDashboardIsCenteredAndTabular(t *testing.T) {
 	if line == 0 {
 		t.Fatalf("dashboard was not vertically centered:\n%s", view)
 	}
+
+	detailColumn, helpColumn := -1, -1
+	for _, value := range strings.Split(view, "\n") {
+		if index := strings.Index(value, "Mon, Jul 27"); index >= 0 {
+			detailColumn = lipgloss.Width(value[:index])
+		}
+		if strings.Contains(value, "q quit") {
+			if index := strings.Index(value, "hl"); index >= 0 {
+				helpColumn = lipgloss.Width(value[:index])
+			}
+		}
+	}
+	if detailColumn < 0 || helpColumn < 0 || detailColumn != helpColumn {
+		t.Fatalf("detail column = %d, help column = %d; want matching alignment:\n%s", detailColumn, helpColumn, view)
+	}
 }
 
 func TestDashboardMarksTimesheetEnd(t *testing.T) {
@@ -467,6 +482,11 @@ func TestDashboardMarksTimesheetEnd(t *testing.T) {
 	}
 	if !strings.Contains(view, "※ today and timesheet end") {
 		t.Fatalf("dashboard does not explain combined marker:\n%s", view)
+	}
+	legend := strings.Index(view, "* today")
+	help := strings.Index(view, "q quit")
+	if legend < 0 || help < 0 || legend < help {
+		t.Fatalf("dashboard marker legend should appear below the controls:\n%s", view)
 	}
 
 	model.weekStart = time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)

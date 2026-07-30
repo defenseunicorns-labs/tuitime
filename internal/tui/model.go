@@ -894,9 +894,6 @@ func (m Model) dashboardView() string {
 	body.WriteString(lipgloss.NewStyle().Width(tableWidth).Render(heading))
 	body.WriteString("\n")
 	body.WriteString(subtitleStyle.Render(fmt.Sprintf("%s – %s", m.weekStart.Format("Jan 2"), weekEnd.Format("Jan 2, 2006"))))
-	body.WriteString("  " + mutedStyle.Render("* today"))
-	body.WriteString("  " + mutedStyle.Render("+ timesheet end"))
-	body.WriteString("  " + mutedStyle.Render("※ today and timesheet end"))
 	body.WriteString("\n\n")
 	body.WriteString(timesheet.Render())
 	body.WriteString("\n\n")
@@ -908,7 +905,9 @@ func (m Model) dashboardView() string {
 		body.WriteString("\n\n" + errorStyle.Render(m.lastError.Error()))
 	}
 	body.WriteString("\n\n")
-	body.WriteString(helpStyle.Render("hl←→ day  jk↑↓ row  [] week  n new  e edit  t today  r refresh  q quit"))
+	body.WriteString(helpStyle.Render("hl/←→ day  jk/↑↓ row  [] week  n new  e edit  t today  r refresh  q quit"))
+	body.WriteString("\n\n")
+	body.WriteString(mutedStyle.Render("* today | + timesheet end | ※ today and timesheet end"))
 	return m.appFrame(body.String())
 }
 
