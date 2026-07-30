@@ -80,6 +80,7 @@ func TestTimesheetRowsAndTotals(t *testing.T) {
 			{ID: "2", Date: "2026-07-27", Hours: 2.5, JobID: "job-1", TaskID: "task-1"},
 			{ID: "1", Date: "2026-07-28T00:00:00Z", Hours: 4, JobID: "job-1", TaskID: "task-1"},
 			{ID: "3", Date: "2026-07-27", Hours: 1, JobID: "job-2", TaskID: "task-2"},
+			{ID: "4", Date: "2026-08-03", Hours: 200, JobID: "job-1", TaskID: "task-1"},
 		},
 	}
 	rows := model.timesheetRows()
@@ -438,5 +439,39 @@ func TestDashboardIsCenteredAndTabular(t *testing.T) {
 	}
 	if line == 0 {
 		t.Fatalf("dashboard was not vertically centered:\n%s", view)
+	}
+}
+
+func TestDashboardMarksTimesheetEnd(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	model := Model{
+		now:   func() time.Time { return now },
+		width: 120, height: 30,
+		screen:    screenDashboard,
+		weekStart: time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC),
+		me:        clicktime.Me{Name: "Test User"},
+		entries: []clicktime.TimeEntry{{
+			ID: "entry-1", Date: "2026-07-15", Hours: 8,
+			JobID: "job-1", TaskID: "task-1",
+		}},
+		jobs:  []clicktime.Job{{ID: "job-1", Name: "Apollo"}},
+		tasks: []clicktime.Task{{ID: "task-1", Name: "Labor"}},
+	}
+	view := model.View()
+	if !strings.Contains(view, "Wed 15※") {
+		t.Fatalf("dashboard does not mark today when it is a timesheet end:\n%s", view)
+	}
+	if !strings.Contains(view, "+ timesheet end") {
+		t.Fatalf("dashboard does not explain timesheet end marker:\n%s", view)
+	}
+	if !strings.Contains(view, "※ today and timesheet end") {
+		t.Fatalf("dashboard does not explain combined marker:\n%s", view)
+	}
+
+	model.weekStart = time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	view = model.View()
+	if !strings.Contains(view, "Fri 31+") {
+		t.Fatalf("dashboard does not mark month end as timesheet end:\n%s", view)
 	}
 }

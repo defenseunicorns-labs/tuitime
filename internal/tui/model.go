@@ -824,15 +824,11 @@ func (m Model) dashboardView() string {
 
 	rows := m.timesheetRows()
 	tableWidth := m.timesheetTableWidth()
-	projectWidth := tableWidth - 80
+	projectWidth := tableWidth - 87
 	headers := []string{"Project", "Task"}
 	for day := 0; day < 7; day++ {
 		date := m.weekStart.AddDate(0, 0, day)
-		header := date.Format("Mon 02")
-		if sameDay(date, m.now()) {
-			header += "*"
-		}
-		headers = append(headers, header)
+		headers = append(headers, m.dayHeader(date))
 	}
 	headers = append(headers, "Total")
 
@@ -887,7 +883,7 @@ func (m Model) dashboardView() string {
 			case col == 1:
 				return style.Width(12).Align(lipgloss.Left)
 			case col >= 2 && col <= 8:
-				return style.Padding(0).Width(7).Align(lipgloss.Center)
+				return style.Padding(0).Width(8).Align(lipgloss.Center)
 			default:
 				return style.Padding(0, 1).Width(8).Align(lipgloss.Right)
 			}
@@ -899,6 +895,8 @@ func (m Model) dashboardView() string {
 	body.WriteString("\n")
 	body.WriteString(subtitleStyle.Render(fmt.Sprintf("%s – %s", m.weekStart.Format("Jan 2"), weekEnd.Format("Jan 2, 2006"))))
 	body.WriteString("  " + mutedStyle.Render("* today"))
+	body.WriteString("  " + mutedStyle.Render("+ timesheet end"))
+	body.WriteString("  " + mutedStyle.Render("※ today and timesheet end"))
 	body.WriteString("\n\n")
 	body.WriteString(timesheet.Render())
 	body.WriteString("\n\n")
@@ -1096,6 +1094,26 @@ func (m Model) selectedDate() time.Time {
 	return m.weekStart.AddDate(0, 0, min(6, max(0, m.dayCursor)))
 }
 
+func (m Model) dayHeader(date time.Time) string {
+	header := date.Format("Mon 02")
+	today := sameDay(date, m.now())
+	timesheetEnd := m.isTimesheetEnd(date)
+	switch {
+	case today && timesheetEnd:
+		return header + "※"
+	case today:
+		return header + "*"
+	case timesheetEnd:
+		return header + "+"
+	default:
+		return header
+	}
+}
+
+func (m Model) isTimesheetEnd(date time.Time) bool {
+	return date.Day() == 15 || date.Day() == lastDayOfMonth(date)
+}
+
 func (m Model) selectedEntries() []trackedEntry {
 	rows := m.timesheetRows()
 	if m.cursor < 0 || m.cursor >= len(rows) || m.dayCursor < 0 || m.dayCursor > 6 {
@@ -1152,6 +1170,10 @@ func hiddenTimeOffType(name string) bool {
 	}
 }
 
+func lastDayOfMonth(date time.Time) int {
+	return time.Date(date.Year(), date.Month()+1, 0, 0, 0, 0, 0, date.Location()).Day()
+}
+
 func (m Model) totalForDate(date time.Time) float64 {
 	var total float64
 	for _, entry := range m.entries {
@@ -1169,11 +1191,8 @@ func (m Model) totalForDate(date time.Time) float64 {
 
 func (m Model) weekTotal() float64 {
 	var total float64
-	for _, entry := range m.entries {
-		total += float64(entry.Hours)
-	}
-	for _, entry := range m.timeOffEntries {
-		total += float64(entry.Hours)
+	for day := 0; day < 7; day++ {
+		total += m.totalForDate(m.weekStart.AddDate(0, 0, day))
 	}
 	return total
 }
@@ -1252,6 +1271,7 @@ func loadAllCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
+		weekEnd := week.AddDate(0, 0, 6)
 		me, err := api.Me(ctx)
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
@@ -1272,11 +1292,11 @@ func loadAllCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
 		}
-		entries, err := api.TimeEntries(ctx, week, week.AddDate(0, 0, 6))
+		entries, err := api.TimeEntries(ctx, week, weekEnd)
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
 		}
-		timeOffEntries, err := api.TimeOff(ctx, week, week.AddDate(0, 0, 6))
+		timeOffEntries, err := api.TimeOff(ctx, week, weekEnd)
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
 		}
@@ -1291,11 +1311,12 @@ func loadEntriesCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
-		entries, err := api.TimeEntries(ctx, week, week.AddDate(0, 0, 6))
+		weekEnd := week.AddDate(0, 0, 6)
+		entries, err := api.TimeEntries(ctx, week, weekEnd)
 		if err != nil {
 			return operationErrorMsg{op: "load week", err: err}
 		}
-		timeOffEntries, err := api.TimeOff(ctx, week, week.AddDate(0, 0, 6))
+		timeOffEntries, err := api.TimeOff(ctx, week, weekEnd)
 		if err != nil {
 			return operationErrorMsg{op: "load week", err: err}
 		}

@@ -5,6 +5,7 @@ A small terminal UI for filling out a ClickTime timesheet. It is written in Go w
 ## Features
 
 - View projects, tasks, time off, daily hours, and totals in a Monday–Sunday table
+- Mark today with `*`, assumed timesheet period ends with `+`, and both with `※`
 - Center the application within the terminal viewport
 - Move between days and weeks, and jump back to today
 - Create project time by choosing a project and task
