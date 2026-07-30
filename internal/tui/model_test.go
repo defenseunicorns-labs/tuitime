@@ -240,22 +240,38 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	if got := updated.(Model).dayCursor; got != 3 {
 		t.Fatalf("l dayCursor = %d, want 3", got)
 	}
+	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRight})
+	if got := updated.(Model).dayCursor; got != 3 {
+		t.Fatalf("right dayCursor = %d, want 3", got)
+	}
 	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 	if got := updated.(Model).dayCursor; got != 1 {
 		t.Fatalf("h dayCursor = %d, want 1", got)
+	}
+	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyLeft})
+	if got := updated.(Model).dayCursor; got != 1 {
+		t.Fatalf("left dayCursor = %d, want 1", got)
 	}
 	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	if got := updated.(Model).cursor; got != 1 {
 		t.Fatalf("j cursor = %d, want 1", got)
 	}
-	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyLeft})
+	updated, _ = updated.(Model).updateDashboard(tea.KeyMsg{Type: tea.KeyUp})
+	if got := updated.(Model).cursor; got != 0 {
+		t.Fatalf("up cursor = %d, want 0", got)
+	}
+	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyDown})
+	if got := updated.(Model).cursor; got != 1 {
+		t.Fatalf("down cursor = %d, want 1", got)
+	}
+	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
 	previous := updated.(Model)
 	if got := previous.weekStart.Format(time.DateOnly); got != "2026-07-20" || previous.screen != screenLoading {
-		t.Fatalf("left week = %s, screen = %v", got, previous.screen)
+		t.Fatalf("[ week = %s, screen = %v", got, previous.screen)
 	}
-	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRight})
+	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
 	if got := updated.(Model).weekStart.Format(time.DateOnly); got != "2026-08-03" {
-		t.Fatalf("right week = %s, want 2026-08-03", got)
+		t.Fatalf("] week = %s, want 2026-08-03", got)
 	}
 }
 

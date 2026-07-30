@@ -348,17 +348,17 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < len(rows)-1 {
 			m.cursor++
 		}
-	case "h":
+	case "left", "h":
 		if m.dayCursor > 0 {
 			m.dayCursor--
 		}
-	case "l":
+	case "right", "l":
 		if m.dayCursor < 6 {
 			m.dayCursor++
 		}
-	case "left", "[", "pgup", "shift+left":
+	case "[", "pgup", "shift+left":
 		return m.changeWeek(-7)
-	case "right", "]", "pgdown", "shift+right":
+	case "]", "pgdown", "shift+right":
 		return m.changeWeek(7)
 	case "t":
 		start := startOfWeek(m.now())
@@ -910,7 +910,7 @@ func (m Model) dashboardView() string {
 		body.WriteString("\n\n" + errorStyle.Render(m.lastError.Error()))
 	}
 	body.WriteString("\n\n")
-	body.WriteString(helpStyle.Render("h/l day  j/k row  ←/→ week  n new  e edit  t today  r refresh  q quit"))
+	body.WriteString(helpStyle.Render("hl←→ day  jk↑↓ row  [] week  n new  e edit  t today  r refresh  q quit"))
 	return m.appFrame(body.String())
 }
 
@@ -987,7 +987,7 @@ func (m Model) reviewView() string {
 	if m.lastError != nil {
 		body.WriteString("\n\n" + errorStyle.Render(m.lastError.Error()))
 	}
-	body.WriteString("\n\n" + helpStyle.Render("y/enter confirm  b/esc back"))
+	body.WriteString("\n\n" + helpStyle.Render("y enter confirm  b esc back"))
 	return m.appFrame(body.String())
 }
 
@@ -996,7 +996,7 @@ func (m Model) errorView() string {
 	if m.lastError != nil {
 		message = m.lastError.Error()
 	}
-	body := titleStyle.Render("tuitime") + "\n\n" + errorStyle.Render(message) + "\n\n" + helpStyle.Render("r/enter retry  q quit")
+	body := titleStyle.Render("tuitime") + "\n\n" + errorStyle.Render(message) + "\n\n" + helpStyle.Render("r enter retry  q quit")
 	return m.appFrame(body)
 }
 

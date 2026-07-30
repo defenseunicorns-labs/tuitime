@@ -47,11 +47,11 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 
 | Key | Action |
 | --- | --- |
-| `k`, `j` | Select a project/task row |
-| `h`, `l` | Select a day |
-| `←`, `→` | Previous or next week |
+| `kj↑↓` | Select a project/task row |
+| `hl←→` | Select a day |
+| `[]` | Previous or next week |
 | `n` | Add an entry in the selected day |
-| `e` or `enter` | Edit the selected cell; quick-add time if it is empty |
+| `e` `enter` | Edit the selected cell; quick-add time if it is empty |
 | `t` | Current week |
 | `r` | Refresh |
 | `q` | Quit |
@@ -63,7 +63,7 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 - In a picker, `/` starts filtering, `enter` selects, `esc` goes back one page, and `q` cancels the entry flow.
 - The selected date is read-only in the entry form.
 - In the form, `tab` moves between fields, `ctrl+r` opens review, and `esc` returns to the previous picker.
-- On review, `y` or `enter` submits; `b` or `esc` goes back.
+- On review, `y` `enter` submits; `b` `esc` goes back.
 - `ctrl+c` exits from any screen.
 
 ## Development
