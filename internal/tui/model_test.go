@@ -323,6 +323,51 @@ func TestEntryFormDateIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestEnterOnEmptyNotesReviewsEntry(t *testing.T) {
+	t.Parallel()
+	model := NewAt(nil, func() time.Time {
+		return time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
+	})
+	model.draft = draft{
+		date: "2026-07-29", clientName: "Space", jobName: "OMEN.Delivery", taskName: "Integration",
+	}
+	model.openForm()
+	model.hoursInput.SetValue("8")
+	model.setFormFocus(1)
+
+	updated, _ := model.updateForm(tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyEnter})
+	review := updated.(Model)
+	if review.screen != screenReview {
+		t.Fatalf("screen = %v, want %v", review.screen, screenReview)
+	}
+	if review.draft.hours != 8 || review.draft.comment != "" {
+		t.Fatalf("draft = %#v", review.draft)
+	}
+}
+
+func TestEnterOnPopulatedNotesInsertsNewline(t *testing.T) {
+	t.Parallel()
+	model := NewAt(nil, func() time.Time {
+		return time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
+	})
+	model.draft = draft{
+		date: "2026-07-29", clientName: "Space", jobName: "OMEN.Delivery", taskName: "Integration",
+	}
+	model.openForm()
+	model.hoursInput.SetValue("8")
+	model.notesInput.SetValue("Already started")
+	model.setFormFocus(1)
+
+	updated, _ := model.updateForm(tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyEnter})
+	form := updated.(Model)
+	if form.screen != screenForm {
+		t.Fatalf("screen = %v, want %v", form.screen, screenForm)
+	}
+	if !strings.Contains(form.notesInput.Value(), "\n") {
+		t.Fatalf("notes value = %q, want newline", form.notesInput.Value())
+	}
+}
+
 func TestResolveTaskIDsFromCatalog(t *testing.T) {
 	t.Parallel()
 	catalog := []clicktime.Task{

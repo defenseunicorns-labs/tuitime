@@ -718,6 +718,9 @@ func (m Model) updateForm(message tea.Msg, key tea.KeyMsg) (tea.Model, tea.Cmd) 
 			m.setFormFocus(1)
 			return m, nil
 		}
+		if m.formFocus == 1 && strings.TrimSpace(m.notesInput.Value()) == "" {
+			return m.prepareReview()
+		}
 		if m.formFocus == 2 {
 			return m.prepareReview()
 		}
