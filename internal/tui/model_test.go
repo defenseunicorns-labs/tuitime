@@ -259,6 +259,41 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	}
 }
 
+func TestEditEmptyProjectCellStartsNewEntryForSelectedRow(t *testing.T) {
+	t.Parallel()
+	week := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return week })
+	model.screen = screenDashboard
+	model.weekStart = week
+	model.dayCursor = 1
+	model.clients = []clicktime.ClientResource{{ID: "client-1", Name: "Space"}}
+	model.jobs = []clicktime.Job{{ID: "job-1", ClientID: "client-1", Name: "Apollo"}}
+	model.tasks = []clicktime.Task{{ID: "task-1", Name: "Labor"}}
+	model.entries = []clicktime.TimeEntry{
+		{ID: "entry-1", Date: "2026-07-27", Hours: 2, JobID: "job-1", TaskID: "task-1"},
+	}
+
+	updated, _ := model.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	form := updated.(Model)
+	if form.screen != screenForm {
+		t.Fatalf("screen = %v, want %v", form.screen, screenForm)
+	}
+	if form.draft.kind != projectEntry || form.draft.date != "2026-07-28" || form.draft.jobID != "job-1" || form.draft.taskID != "task-1" {
+		t.Fatalf("draft = %#v", form.draft)
+	}
+	if form.draft.clientName != "Space" || form.draft.jobName != "Apollo" || form.draft.taskName != "Labor" {
+		t.Fatalf("draft labels = client %q, job %q, task %q", form.draft.clientName, form.draft.jobName, form.draft.taskName)
+	}
+	if form.hoursInput.Value() != "" || form.notesInput.Value() != "" || form.formFocus != 0 {
+		t.Fatalf("form inputs = hours %q, notes %q, focus %d", form.hoursInput.Value(), form.notesInput.Value(), form.formFocus)
+	}
+
+	updated, _ = form.updateForm(tea.KeyMsg{Type: tea.KeyEsc}, tea.KeyMsg{Type: tea.KeyEsc})
+	if dashboard := updated.(Model); dashboard.screen != screenDashboard {
+		t.Fatalf("esc returned to screen = %v, want %v", dashboard.screen, screenDashboard)
+	}
+}
+
 func TestEntryFormDateIsReadOnly(t *testing.T) {
 	t.Parallel()
 	model := NewAt(nil, func() time.Time {

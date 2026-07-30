@@ -51,7 +51,7 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 | `h`, `l` | Select a day |
 | `←`, `→` | Previous or next week |
 | `n` | Add an entry in the selected day |
-| `e` or `enter` | Edit the selected cell; choose an entry if it contains several |
+| `e` or `enter` | Edit the selected cell; quick-add time if it is empty |
 | `t` | Current week |
 | `r` | Refresh |
 | `q` | Quit |
@@ -59,6 +59,7 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 ### Entry workflow
 
 - Adding time first asks whether it is **Projects** or **Time Off**.
+- Pressing `e` on an empty project/task cell opens a new entry for that date and row.
 - In a picker, `/` starts filtering, `enter` selects, `esc` goes back one page, and `q` cancels the entry flow.
 - The selected date is read-only in the entry form.
 - In the form, `tab` moves between fields, `ctrl+r` opens review, and `esc` returns to the previous picker.

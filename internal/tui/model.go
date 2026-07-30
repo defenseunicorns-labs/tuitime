@@ -74,6 +74,7 @@ type draft struct {
 	timeOffTypeID   string
 	timeOffTypeName string
 	entryID         string
+	returnDashboard bool
 }
 
 type trackedEntry struct {
@@ -382,7 +383,11 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		entries := m.selectedEntries()
 		switch len(entries) {
 		case 0:
-			m.status = "No entry in the selected cell. Press n to add one."
+			if m.cursor < 0 || m.cursor >= len(rows) {
+				m.status = "No project row is selected. Press n to add one."
+				return m, nil
+			}
+			m.beginNewEntryForRow(m.selectedDate(), rows[m.cursor])
 		case 1:
 			if entries[0].key() == "project:" || entries[0].key() == "timeoff:" {
 				m.status = "ClickTime did not return an ID for that entry, so it cannot be edited."
@@ -411,6 +416,49 @@ func (m *Model) beginNewEntry(date time.Time) {
 	m.draft = draft{date: date.Format(time.DateOnly)}
 	m.availableTasks = nil
 	m.openCategoryPicker()
+}
+
+func (m *Model) beginNewEntryForRow(date time.Time, row timesheetRow) {
+	m.status = ""
+	m.lastError = nil
+	m.availableTasks = nil
+
+	if row.kind == timeOffEntry {
+		timeOffType := m.timeOffTypeByID(row.taskID)
+		typeName := timeOffType.Label()
+		if typeName == "" {
+			typeName = row.task
+		}
+		m.draft = draft{
+			kind: timeOffEntry, date: date.Format(time.DateOnly),
+			timeOffTypeID: row.taskID, timeOffTypeName: typeName, returnDashboard: true,
+		}
+		m.openForm()
+		return
+	}
+
+	job := m.jobByID(row.jobID)
+	client := m.clientByID(job.ClientID)
+	task := m.taskByID(row.taskID)
+	clientName := client.Label()
+	if clientName == "" {
+		clientName = "—"
+	}
+	jobName := job.Label()
+	if jobName == "" {
+		jobName = row.project
+	}
+	taskName := task.Label()
+	if taskName == "" {
+		taskName = row.task
+	}
+	m.draft = draft{
+		kind: projectEntry, date: date.Format(time.DateOnly),
+		clientID: client.ID, clientName: clientName,
+		jobID: row.jobID, jobName: jobName,
+		taskID: row.taskID, taskName: taskName, returnDashboard: true,
+	}
+	m.openForm()
 }
 
 func (m *Model) openCategoryPicker() {
@@ -624,7 +672,7 @@ func (m *Model) backFromPicker() {
 func (m *Model) backFromForm() {
 	m.lastError = nil
 	m.blurForm()
-	if m.draft.entryID != "" {
+	if m.draft.entryID != "" || m.draft.returnDashboard {
 		m.screen = screenDashboard
 		return
 	}
@@ -1064,7 +1112,7 @@ func (m Model) selectedCellDetail(rows []timesheetRow) string {
 	entries := row.entries[m.dayCursor]
 	prefix := activeLabelStyle.Render(date) + "  " + row.project + " / " + row.task
 	if len(entries) == 0 {
-		return detailStyle.Width(m.timesheetTableWidth()).Render(prefix + mutedStyle.Render("  No entry — press n to add time"))
+		return detailStyle.Width(m.timesheetTableWidth()).Render(prefix + mutedStyle.Render("  No entry — press e to add here"))
 	}
 	if len(entries) == 1 {
 		detail := fmt.Sprintf("  %.2fh", entries[0].hours())
