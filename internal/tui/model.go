@@ -74,6 +74,7 @@ type draft struct {
 	timeOffTypeID   string
 	timeOffTypeName string
 	entryID         string
+	returnDashboard bool
 }
 
 type trackedEntry struct {
@@ -347,17 +348,17 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < len(rows)-1 {
 			m.cursor++
 		}
-	case "h":
+	case "left", "h":
 		if m.dayCursor > 0 {
 			m.dayCursor--
 		}
-	case "l":
+	case "right", "l":
 		if m.dayCursor < 6 {
 			m.dayCursor++
 		}
-	case "left", "[", "pgup", "shift+left":
+	case "[", "pgup", "shift+left":
 		return m.changeWeek(-7)
-	case "right", "]", "pgdown", "shift+right":
+	case "]", "pgdown", "shift+right":
 		return m.changeWeek(7)
 	case "t":
 		start := startOfWeek(m.now())
@@ -382,7 +383,11 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		entries := m.selectedEntries()
 		switch len(entries) {
 		case 0:
-			m.status = "No entry in the selected cell. Press n to add one."
+			if m.cursor < 0 || m.cursor >= len(rows) {
+				m.status = "No project row is selected. Press n to add one."
+				return m, nil
+			}
+			m.beginNewEntryForRow(m.selectedDate(), rows[m.cursor])
 		case 1:
 			if entries[0].key() == "project:" || entries[0].key() == "timeoff:" {
 				m.status = "ClickTime did not return an ID for that entry, so it cannot be edited."
@@ -411,6 +416,49 @@ func (m *Model) beginNewEntry(date time.Time) {
 	m.draft = draft{date: date.Format(time.DateOnly)}
 	m.availableTasks = nil
 	m.openCategoryPicker()
+}
+
+func (m *Model) beginNewEntryForRow(date time.Time, row timesheetRow) {
+	m.status = ""
+	m.lastError = nil
+	m.availableTasks = nil
+
+	if row.kind == timeOffEntry {
+		timeOffType := m.timeOffTypeByID(row.taskID)
+		typeName := timeOffType.Label()
+		if typeName == "" {
+			typeName = row.task
+		}
+		m.draft = draft{
+			kind: timeOffEntry, date: date.Format(time.DateOnly),
+			timeOffTypeID: row.taskID, timeOffTypeName: typeName, returnDashboard: true,
+		}
+		m.openForm()
+		return
+	}
+
+	job := m.jobByID(row.jobID)
+	client := m.clientByID(job.ClientID)
+	task := m.taskByID(row.taskID)
+	clientName := client.Label()
+	if clientName == "" {
+		clientName = "—"
+	}
+	jobName := job.Label()
+	if jobName == "" {
+		jobName = row.project
+	}
+	taskName := task.Label()
+	if taskName == "" {
+		taskName = row.task
+	}
+	m.draft = draft{
+		kind: projectEntry, date: date.Format(time.DateOnly),
+		clientID: client.ID, clientName: clientName,
+		jobID: row.jobID, jobName: jobName,
+		taskID: row.taskID, taskName: taskName, returnDashboard: true,
+	}
+	m.openForm()
 }
 
 func (m *Model) openCategoryPicker() {
@@ -624,7 +672,7 @@ func (m *Model) backFromPicker() {
 func (m *Model) backFromForm() {
 	m.lastError = nil
 	m.blurForm()
-	if m.draft.entryID != "" {
+	if m.draft.entryID != "" || m.draft.returnDashboard {
 		m.screen = screenDashboard
 		return
 	}
@@ -669,6 +717,9 @@ func (m Model) updateForm(message tea.Msg, key tea.KeyMsg) (tea.Model, tea.Cmd) 
 		if m.formFocus == 0 {
 			m.setFormFocus(1)
 			return m, nil
+		}
+		if m.formFocus == 1 && strings.TrimSpace(m.notesInput.Value()) == "" {
+			return m.prepareReview()
 		}
 		if m.formFocus == 2 {
 			return m.prepareReview()
@@ -773,15 +824,11 @@ func (m Model) dashboardView() string {
 
 	rows := m.timesheetRows()
 	tableWidth := m.timesheetTableWidth()
-	projectWidth := tableWidth - 80
+	projectWidth := tableWidth - 87
 	headers := []string{"Project", "Task"}
 	for day := 0; day < 7; day++ {
 		date := m.weekStart.AddDate(0, 0, day)
-		header := date.Format("Mon 02")
-		if sameDay(date, m.now()) {
-			header += "*"
-		}
-		headers = append(headers, header)
+		headers = append(headers, m.dayHeader(date))
 	}
 	headers = append(headers, "Total")
 
@@ -836,7 +883,7 @@ func (m Model) dashboardView() string {
 			case col == 1:
 				return style.Width(12).Align(lipgloss.Left)
 			case col >= 2 && col <= 8:
-				return style.Padding(0).Width(7).Align(lipgloss.Center)
+				return style.Padding(0).Width(8).Align(lipgloss.Center)
 			default:
 				return style.Padding(0, 1).Width(8).Align(lipgloss.Right)
 			}
@@ -847,7 +894,6 @@ func (m Model) dashboardView() string {
 	body.WriteString(lipgloss.NewStyle().Width(tableWidth).Render(heading))
 	body.WriteString("\n")
 	body.WriteString(subtitleStyle.Render(fmt.Sprintf("%s – %s", m.weekStart.Format("Jan 2"), weekEnd.Format("Jan 2, 2006"))))
-	body.WriteString("  " + mutedStyle.Render("* today"))
 	body.WriteString("\n\n")
 	body.WriteString(timesheet.Render())
 	body.WriteString("\n\n")
@@ -859,7 +905,9 @@ func (m Model) dashboardView() string {
 		body.WriteString("\n\n" + errorStyle.Render(m.lastError.Error()))
 	}
 	body.WriteString("\n\n")
-	body.WriteString(helpStyle.Render("h/l day  j/k row  ←/→ week  n new  e edit  t today  r refresh  q quit"))
+	body.WriteString(helpStyle.Render("hl/←→ day  jk/↑↓ row  [] week  n new  e edit  t today  r refresh  q quit"))
+	body.WriteString("\n\n")
+	body.WriteString(mutedStyle.Render("* today | + timesheet end | ※ today and timesheet end"))
 	return m.appFrame(body.String())
 }
 
@@ -936,7 +984,7 @@ func (m Model) reviewView() string {
 	if m.lastError != nil {
 		body.WriteString("\n\n" + errorStyle.Render(m.lastError.Error()))
 	}
-	body.WriteString("\n\n" + helpStyle.Render("y/enter confirm  b/esc back"))
+	body.WriteString("\n\n" + helpStyle.Render("y enter confirm  b esc back"))
 	return m.appFrame(body.String())
 }
 
@@ -945,7 +993,7 @@ func (m Model) errorView() string {
 	if m.lastError != nil {
 		message = m.lastError.Error()
 	}
-	body := titleStyle.Render("tuitime") + "\n\n" + errorStyle.Render(message) + "\n\n" + helpStyle.Render("r/enter retry  q quit")
+	body := titleStyle.Render("tuitime") + "\n\n" + errorStyle.Render(message) + "\n\n" + helpStyle.Render("r enter retry  q quit")
 	return m.appFrame(body)
 }
 
@@ -1045,6 +1093,26 @@ func (m Model) selectedDate() time.Time {
 	return m.weekStart.AddDate(0, 0, min(6, max(0, m.dayCursor)))
 }
 
+func (m Model) dayHeader(date time.Time) string {
+	header := date.Format("Mon 02")
+	today := sameDay(date, m.now())
+	timesheetEnd := m.isTimesheetEnd(date)
+	switch {
+	case today && timesheetEnd:
+		return header + "※"
+	case today:
+		return header + "*"
+	case timesheetEnd:
+		return header + "+"
+	default:
+		return header
+	}
+}
+
+func (m Model) isTimesheetEnd(date time.Time) bool {
+	return date.Day() == 15 || date.Day() == lastDayOfMonth(date)
+}
+
 func (m Model) selectedEntries() []trackedEntry {
 	rows := m.timesheetRows()
 	if m.cursor < 0 || m.cursor >= len(rows) || m.dayCursor < 0 || m.dayCursor > 6 {
@@ -1064,7 +1132,7 @@ func (m Model) selectedCellDetail(rows []timesheetRow) string {
 	entries := row.entries[m.dayCursor]
 	prefix := activeLabelStyle.Render(date) + "  " + row.project + " / " + row.task
 	if len(entries) == 0 {
-		return detailStyle.Width(m.timesheetTableWidth()).Render(prefix + mutedStyle.Render("  No entry — press n to add time"))
+		return detailStyle.Width(m.timesheetTableWidth()).Render(prefix + mutedStyle.Render("  No entry — press e to add here"))
 	}
 	if len(entries) == 1 {
 		detail := fmt.Sprintf("  %.2fh", entries[0].hours())
@@ -1101,6 +1169,10 @@ func hiddenTimeOffType(name string) bool {
 	}
 }
 
+func lastDayOfMonth(date time.Time) int {
+	return time.Date(date.Year(), date.Month()+1, 0, 0, 0, 0, 0, date.Location()).Day()
+}
+
 func (m Model) totalForDate(date time.Time) float64 {
 	var total float64
 	for _, entry := range m.entries {
@@ -1118,11 +1190,8 @@ func (m Model) totalForDate(date time.Time) float64 {
 
 func (m Model) weekTotal() float64 {
 	var total float64
-	for _, entry := range m.entries {
-		total += float64(entry.Hours)
-	}
-	for _, entry := range m.timeOffEntries {
-		total += float64(entry.Hours)
+	for day := 0; day < 7; day++ {
+		total += m.totalForDate(m.weekStart.AddDate(0, 0, day))
 	}
 	return total
 }
@@ -1201,6 +1270,7 @@ func loadAllCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
+		weekEnd := week.AddDate(0, 0, 6)
 		me, err := api.Me(ctx)
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
@@ -1221,11 +1291,11 @@ func loadAllCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
 		}
-		entries, err := api.TimeEntries(ctx, week, week.AddDate(0, 0, 6))
+		entries, err := api.TimeEntries(ctx, week, weekEnd)
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
 		}
-		timeOffEntries, err := api.TimeOff(ctx, week, week.AddDate(0, 0, 6))
+		timeOffEntries, err := api.TimeOff(ctx, week, weekEnd)
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
 		}
@@ -1240,11 +1310,12 @@ func loadEntriesCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
-		entries, err := api.TimeEntries(ctx, week, week.AddDate(0, 0, 6))
+		weekEnd := week.AddDate(0, 0, 6)
+		entries, err := api.TimeEntries(ctx, week, weekEnd)
 		if err != nil {
 			return operationErrorMsg{op: "load week", err: err}
 		}
-		timeOffEntries, err := api.TimeOff(ctx, week, week.AddDate(0, 0, 6))
+		timeOffEntries, err := api.TimeOff(ctx, week, weekEnd)
 		if err != nil {
 			return operationErrorMsg{op: "load week", err: err}
 		}

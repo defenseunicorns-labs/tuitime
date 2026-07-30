@@ -5,6 +5,7 @@
 # Local environment files
 .env
 .env.*
+.envrc
 
 # Editor and OS files
 .DS_Store

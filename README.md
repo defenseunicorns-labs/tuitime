@@ -5,6 +5,7 @@ A small terminal UI for filling out a ClickTime timesheet. It is written in Go w
 ## Features
 
 - View projects, tasks, time off, daily hours, and totals in a Monday–Sunday table
+- Mark today with `*`, assumed timesheet period ends with `+`, and both with `※`
 - Center the application within the terminal viewport
 - Move between days and weeks, and jump back to today
 - Create project time by choosing a project and task
@@ -47,11 +48,11 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 
 | Key | Action |
 | --- | --- |
-| `k`, `j` | Select a project/task row |
-| `h`, `l` | Select a day |
-| `←`, `→` | Previous or next week |
+| `kj↑↓` | Select a project/task row |
+| `hl←→` | Select a day |
+| `[]` | Previous or next week |
 | `n` | Add an entry in the selected day |
-| `e` or `enter` | Edit the selected cell; choose an entry if it contains several |
+| `e` `enter` | Edit the selected cell; quick-add time if it is empty |
 | `t` | Current week |
 | `r` | Refresh |
 | `q` | Quit |
@@ -59,10 +60,11 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 ### Entry workflow
 
 - Adding time first asks whether it is **Projects** or **Time Off**.
+- Pressing `e` on an empty project/task cell opens a new entry for that date and row.
 - In a picker, `/` starts filtering, `enter` selects, `esc` goes back one page, and `q` cancels the entry flow.
 - The selected date is read-only in the entry form.
 - In the form, `tab` moves between fields, `ctrl+r` opens review, and `esc` returns to the previous picker.
-- On review, `y` or `enter` submits; `b` or `esc` goes back.
+- On review, `y` `enter` submits; `b` `esc` goes back.
 - `ctrl+c` exits from any screen.
 
 ## Development

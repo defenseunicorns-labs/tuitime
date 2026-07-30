@@ -80,6 +80,7 @@ func TestTimesheetRowsAndTotals(t *testing.T) {
 			{ID: "2", Date: "2026-07-27", Hours: 2.5, JobID: "job-1", TaskID: "task-1"},
 			{ID: "1", Date: "2026-07-28T00:00:00Z", Hours: 4, JobID: "job-1", TaskID: "task-1"},
 			{ID: "3", Date: "2026-07-27", Hours: 1, JobID: "job-2", TaskID: "task-2"},
+			{ID: "4", Date: "2026-08-03", Hours: 200, JobID: "job-1", TaskID: "task-1"},
 		},
 	}
 	rows := model.timesheetRows()
@@ -240,22 +241,73 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	if got := updated.(Model).dayCursor; got != 3 {
 		t.Fatalf("l dayCursor = %d, want 3", got)
 	}
+	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRight})
+	if got := updated.(Model).dayCursor; got != 3 {
+		t.Fatalf("right dayCursor = %d, want 3", got)
+	}
 	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 	if got := updated.(Model).dayCursor; got != 1 {
 		t.Fatalf("h dayCursor = %d, want 1", got)
+	}
+	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyLeft})
+	if got := updated.(Model).dayCursor; got != 1 {
+		t.Fatalf("left dayCursor = %d, want 1", got)
 	}
 	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	if got := updated.(Model).cursor; got != 1 {
 		t.Fatalf("j cursor = %d, want 1", got)
 	}
-	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyLeft})
+	updated, _ = updated.(Model).updateDashboard(tea.KeyMsg{Type: tea.KeyUp})
+	if got := updated.(Model).cursor; got != 0 {
+		t.Fatalf("up cursor = %d, want 0", got)
+	}
+	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyDown})
+	if got := updated.(Model).cursor; got != 1 {
+		t.Fatalf("down cursor = %d, want 1", got)
+	}
+	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
 	previous := updated.(Model)
 	if got := previous.weekStart.Format(time.DateOnly); got != "2026-07-20" || previous.screen != screenLoading {
-		t.Fatalf("left week = %s, screen = %v", got, previous.screen)
+		t.Fatalf("[ week = %s, screen = %v", got, previous.screen)
 	}
-	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRight})
+	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
 	if got := updated.(Model).weekStart.Format(time.DateOnly); got != "2026-08-03" {
-		t.Fatalf("right week = %s, want 2026-08-03", got)
+		t.Fatalf("] week = %s, want 2026-08-03", got)
+	}
+}
+
+func TestEditEmptyProjectCellStartsNewEntryForSelectedRow(t *testing.T) {
+	t.Parallel()
+	week := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return week })
+	model.screen = screenDashboard
+	model.weekStart = week
+	model.dayCursor = 1
+	model.clients = []clicktime.ClientResource{{ID: "client-1", Name: "Space"}}
+	model.jobs = []clicktime.Job{{ID: "job-1", ClientID: "client-1", Name: "Apollo"}}
+	model.tasks = []clicktime.Task{{ID: "task-1", Name: "Labor"}}
+	model.entries = []clicktime.TimeEntry{
+		{ID: "entry-1", Date: "2026-07-27", Hours: 2, JobID: "job-1", TaskID: "task-1"},
+	}
+
+	updated, _ := model.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	form := updated.(Model)
+	if form.screen != screenForm {
+		t.Fatalf("screen = %v, want %v", form.screen, screenForm)
+	}
+	if form.draft.kind != projectEntry || form.draft.date != "2026-07-28" || form.draft.jobID != "job-1" || form.draft.taskID != "task-1" {
+		t.Fatalf("draft = %#v", form.draft)
+	}
+	if form.draft.clientName != "Space" || form.draft.jobName != "Apollo" || form.draft.taskName != "Labor" {
+		t.Fatalf("draft labels = client %q, job %q, task %q", form.draft.clientName, form.draft.jobName, form.draft.taskName)
+	}
+	if form.hoursInput.Value() != "" || form.notesInput.Value() != "" || form.formFocus != 0 {
+		t.Fatalf("form inputs = hours %q, notes %q, focus %d", form.hoursInput.Value(), form.notesInput.Value(), form.formFocus)
+	}
+
+	updated, _ = form.updateForm(tea.KeyMsg{Type: tea.KeyEsc}, tea.KeyMsg{Type: tea.KeyEsc})
+	if dashboard := updated.(Model); dashboard.screen != screenDashboard {
+		t.Fatalf("esc returned to screen = %v, want %v", dashboard.screen, screenDashboard)
 	}
 }
 
@@ -285,6 +337,51 @@ func TestEntryFormDateIsReadOnly(t *testing.T) {
 	review := updated.(Model)
 	if review.draft.date != "2026-07-29" || review.screen != screenReview {
 		t.Fatalf("review date = %q, screen = %v", review.draft.date, review.screen)
+	}
+}
+
+func TestEnterOnEmptyNotesReviewsEntry(t *testing.T) {
+	t.Parallel()
+	model := NewAt(nil, func() time.Time {
+		return time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
+	})
+	model.draft = draft{
+		date: "2026-07-29", clientName: "Space", jobName: "OMEN.Delivery", taskName: "Integration",
+	}
+	model.openForm()
+	model.hoursInput.SetValue("8")
+	model.setFormFocus(1)
+
+	updated, _ := model.updateForm(tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyEnter})
+	review := updated.(Model)
+	if review.screen != screenReview {
+		t.Fatalf("screen = %v, want %v", review.screen, screenReview)
+	}
+	if review.draft.hours != 8 || review.draft.comment != "" {
+		t.Fatalf("draft = %#v", review.draft)
+	}
+}
+
+func TestEnterOnPopulatedNotesInsertsNewline(t *testing.T) {
+	t.Parallel()
+	model := NewAt(nil, func() time.Time {
+		return time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
+	})
+	model.draft = draft{
+		date: "2026-07-29", clientName: "Space", jobName: "OMEN.Delivery", taskName: "Integration",
+	}
+	model.openForm()
+	model.hoursInput.SetValue("8")
+	model.notesInput.SetValue("Already started")
+	model.setFormFocus(1)
+
+	updated, _ := model.updateForm(tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyEnter})
+	form := updated.(Model)
+	if form.screen != screenForm {
+		t.Fatalf("screen = %v, want %v", form.screen, screenForm)
+	}
+	if !strings.Contains(form.notesInput.Value(), "\n") {
+		t.Fatalf("notes value = %q, want newline", form.notesInput.Value())
 	}
 }
 
@@ -342,5 +439,59 @@ func TestDashboardIsCenteredAndTabular(t *testing.T) {
 	}
 	if line == 0 {
 		t.Fatalf("dashboard was not vertically centered:\n%s", view)
+	}
+
+	detailColumn, helpColumn := -1, -1
+	for _, value := range strings.Split(view, "\n") {
+		if index := strings.Index(value, "Mon, Jul 27"); index >= 0 {
+			detailColumn = lipgloss.Width(value[:index])
+		}
+		if strings.Contains(value, "q quit") {
+			if index := strings.Index(value, "hl"); index >= 0 {
+				helpColumn = lipgloss.Width(value[:index])
+			}
+		}
+	}
+	if detailColumn < 0 || helpColumn < 0 || detailColumn != helpColumn {
+		t.Fatalf("detail column = %d, help column = %d; want matching alignment:\n%s", detailColumn, helpColumn, view)
+	}
+}
+
+func TestDashboardMarksTimesheetEnd(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	model := Model{
+		now:   func() time.Time { return now },
+		width: 120, height: 30,
+		screen:    screenDashboard,
+		weekStart: time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC),
+		me:        clicktime.Me{Name: "Test User"},
+		entries: []clicktime.TimeEntry{{
+			ID: "entry-1", Date: "2026-07-15", Hours: 8,
+			JobID: "job-1", TaskID: "task-1",
+		}},
+		jobs:  []clicktime.Job{{ID: "job-1", Name: "Apollo"}},
+		tasks: []clicktime.Task{{ID: "task-1", Name: "Labor"}},
+	}
+	view := model.View()
+	if !strings.Contains(view, "Wed 15※") {
+		t.Fatalf("dashboard does not mark today when it is a timesheet end:\n%s", view)
+	}
+	if !strings.Contains(view, "+ timesheet end") {
+		t.Fatalf("dashboard does not explain timesheet end marker:\n%s", view)
+	}
+	if !strings.Contains(view, "※ today and timesheet end") {
+		t.Fatalf("dashboard does not explain combined marker:\n%s", view)
+	}
+	legend := strings.Index(view, "* today")
+	help := strings.Index(view, "q quit")
+	if legend < 0 || help < 0 || legend < help {
+		t.Fatalf("dashboard marker legend should appear below the controls:\n%s", view)
+	}
+
+	model.weekStart = time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	view = model.View()
+	if !strings.Contains(view, "Fri 31+") {
+		t.Fatalf("dashboard does not mark month end as timesheet end:\n%s", view)
 	}
 }

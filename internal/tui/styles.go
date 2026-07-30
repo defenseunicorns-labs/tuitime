@@ -78,7 +78,6 @@ var (
 			Foreground(accent)
 
 	detailStyle = lipgloss.NewStyle().
-			Padding(0, 1).
 			Foreground(lipgloss.AdaptiveColor{Light: "#334155", Dark: "#CBD5E1"})
 )
 
