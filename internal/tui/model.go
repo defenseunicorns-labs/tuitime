@@ -985,6 +985,10 @@ func (m Model) dashboardView() string {
 	body.WriteString(lipgloss.NewStyle().Width(tableWidth).Render(heading))
 	body.WriteString("\n")
 	body.WriteString(subtitleStyle.Render(fmt.Sprintf("%s – %s", m.weekStart.Format("Jan 2"), weekEnd.Format("Jan 2, 2006"))))
+	if statusLine := m.timesheetStatusLine(); statusLine != "" {
+		body.WriteString("\n")
+		body.WriteString(statusLine)
+	}
 	body.WriteString("\n\n")
 	body.WriteString(timesheet.Render())
 	body.WriteString("\n\n")
@@ -1235,6 +1239,82 @@ func (m Model) isTimesheetEnd(date time.Time) bool {
 		}
 	}
 	return false
+}
+
+func (m Model) timesheetStatusLine() string {
+	if len(m.timesheets) == 0 {
+		return ""
+	}
+
+	timesheets := append([]clicktime.Timesheet(nil), m.timesheets...)
+	sort.SliceStable(timesheets, func(i, j int) bool {
+		return dateString(timesheets[i].StartDate) < dateString(timesheets[j].StartDate)
+	})
+
+	selectedDate := m.selectedDate()
+	items := make([]string, 0, len(timesheets))
+	for _, timesheet := range timesheets {
+		periodStyle := mutedStyle
+		prefix := "  "
+		if timesheetContainsDate(timesheet, selectedDate) {
+			periodStyle = activeLabelStyle
+			prefix = "› "
+		}
+		status, statusStyle := timesheetStatus(timesheet)
+		items = append(items, periodStyle.Render(prefix+compactTimesheetPeriod(timesheet))+"  "+statusStyle.Render(status))
+	}
+
+	separator := mutedStyle.Render("  |  ")
+	return labelStyle.Render("Timesheets") + "  " + strings.Join(items, separator)
+}
+
+func timesheetStatus(timesheet clicktime.Timesheet) (string, lipgloss.Style) {
+	switch strings.ToLower(strings.TrimSpace(timesheet.Status)) {
+	case "open":
+		return "○ Open", warningStyle
+	case "waiting", "submitted", "pending":
+		return "◷ Submitted · awaiting approval", pendingStyle
+	case "approved":
+		return "✓ Approved", successStyle
+	case "rejected":
+		return "! Rejected", errorStyle
+	}
+
+	if status := strings.TrimSpace(timesheet.Status); status != "" {
+		return "? " + status, mutedStyle
+	}
+	if hasTimesheetAction(timesheet.Actions, "Submit") {
+		return "○ Open", warningStyle
+	}
+	if hasTimesheetAction(timesheet.Actions, "UndoSubmit") || timesheet.HasBeenSubmitted || strings.TrimSpace(timesheet.SubmittedDate) != "" {
+		return "◷ Submitted", pendingStyle
+	}
+	return "? Unknown", mutedStyle
+}
+
+func timesheetContainsDate(timesheet clicktime.Timesheet, date time.Time) bool {
+	start, startErr := time.Parse(time.DateOnly, dateString(timesheet.StartDate))
+	end, endErr := time.Parse(time.DateOnly, dateString(timesheet.EndDate))
+	selected, selectedErr := time.Parse(time.DateOnly, date.Format(time.DateOnly))
+	return startErr == nil && endErr == nil && selectedErr == nil && !selected.Before(start) && !selected.After(end)
+}
+
+func compactTimesheetPeriod(timesheet clicktime.Timesheet) string {
+	start, startErr := time.Parse(time.DateOnly, dateString(timesheet.StartDate))
+	end, endErr := time.Parse(time.DateOnly, dateString(timesheet.EndDate))
+	if startErr != nil || endErr != nil {
+		return displayDateRange(timesheet.StartDate, timesheet.EndDate)
+	}
+	switch {
+	case sameDay(start, end):
+		return start.Format("Jan 2")
+	case start.Year() == end.Year() && start.Month() == end.Month():
+		return fmt.Sprintf("%s %d–%d", start.Format("Jan"), start.Day(), end.Day())
+	case start.Year() == end.Year():
+		return start.Format("Jan 2") + "–" + end.Format("Jan 2")
+	default:
+		return start.Format("Jan 2, 2006") + "–" + end.Format("Jan 2, 2006")
+	}
 }
 
 func hasTimesheetAction(actions []clicktime.TimesheetAction, action string) bool {

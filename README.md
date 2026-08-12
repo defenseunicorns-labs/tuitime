@@ -6,6 +6,7 @@ A small terminal UI for filling out a ClickTime timesheet. It is written in Go w
 
 - View projects, tasks, time off, daily hours, and totals in a Monday–Sunday table
 - Mark today with `*`, ClickTime timesheet period ends with `+`, and both with `※`
+- Show each timesheet period's current status and highlight the period containing the selected day
 - Center the application within the terminal viewport
 - Move between days and weeks, and jump back to today
 - Create project time by choosing a project and task
@@ -72,6 +73,7 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 ### Timesheet submission
 
 - Press `s` to load the ClickTime timesheet containing the selected day.
+- The weekly view identifies each visible period as open, submitted, approved, rejected, or an API-provided status; the selected day's period is highlighted.
 - The confirmation screen shows ClickTime's full period, status, and total hours.
 - Submission is offered only when ClickTime reports `Submit` as an available action.
 - Press `y` or `enter` to attest that the timesheet is accurate and submit the entire period for approval; `b` or `esc` cancels.

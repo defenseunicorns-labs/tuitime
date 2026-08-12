@@ -662,6 +662,80 @@ func TestLoadEntriesIncludesTimesheets(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsTimesheetPeriodStatuses(t *testing.T) {
+	t.Parallel()
+
+	model := Model{
+		now:       func() time.Time { return time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC) },
+		width:     120,
+		height:    30,
+		screen:    screenDashboard,
+		weekStart: time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC),
+		timesheets: []clicktime.Timesheet{
+			{ID: "sheet-2", StartDate: "2026-07-16", EndDate: "2026-07-31", Status: "Open"},
+			{ID: "sheet-1", StartDate: "2026-07-01", EndDate: "2026-07-15", Status: "Waiting"},
+		},
+	}
+
+	view := model.View()
+	for _, text := range []string{"Timesheets", "› Jul 1–15", "◷ Submitted · awaiting approval", "Jul 16–31", "○ Open"} {
+		if !strings.Contains(view, text) {
+			t.Fatalf("dashboard does not contain %q:\n%s", text, view)
+		}
+	}
+	if strings.Index(view, "Jul 1–15") > strings.Index(view, "Jul 16–31") {
+		t.Fatalf("dashboard timesheets are not ordered by period:\n%s", view)
+	}
+
+	model.dayCursor = 3
+	view = model.View()
+	if !strings.Contains(view, "› Jul 16–31") || strings.Contains(view, "› Jul 1–15") {
+		t.Fatalf("dashboard does not highlight the selected day's period:\n%s", view)
+	}
+}
+
+func TestTimesheetContainsDateUsesCalendarDate(t *testing.T) {
+	t.Parallel()
+
+	period := clicktime.Timesheet{StartDate: "2026-07-01", EndDate: "2026-07-15"}
+	location := time.FixedZone("MDT", -6*60*60)
+	endDate := time.Date(2026, time.July, 15, 0, 0, 0, 0, location)
+	if !timesheetContainsDate(period, endDate) {
+		t.Fatal("timesheetContainsDate() excluded the period end in a non-UTC timezone")
+	}
+	if timesheetContainsDate(period, endDate.AddDate(0, 0, 1)) {
+		t.Fatal("timesheetContainsDate() included the day after the period")
+	}
+}
+
+func TestTimesheetStatusPresentation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		timesheet clicktime.Timesheet
+		want      string
+	}{
+		{name: "open", timesheet: clicktime.Timesheet{Status: "Open"}, want: "○ Open"},
+		{name: "waiting", timesheet: clicktime.Timesheet{Status: "Waiting"}, want: "◷ Submitted · awaiting approval"},
+		{name: "approved", timesheet: clicktime.Timesheet{Status: "Approved"}, want: "✓ Approved"},
+		{name: "rejected", timesheet: clicktime.Timesheet{Status: "Rejected"}, want: "! Rejected"},
+		{name: "unknown status", timesheet: clicktime.Timesheet{Status: "Locked"}, want: "? Locked"},
+		{name: "submit action fallback", timesheet: clicktime.Timesheet{Actions: []clicktime.TimesheetAction{{Action: "Submit"}}}, want: "○ Open"},
+		{name: "undo action fallback", timesheet: clicktime.Timesheet{Actions: []clicktime.TimesheetAction{{Action: "UndoSubmit"}}}, want: "◷ Submitted"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got, _ := timesheetStatus(test.timesheet)
+			if got != test.want {
+				t.Fatalf("timesheetStatus() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestDashboardMarksClickTimeTimesheetEnd(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
