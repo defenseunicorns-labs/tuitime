@@ -479,7 +479,9 @@ func (c *Client) requestWithInfo(ctx context.Context, method, path string, query
 	if err != nil {
 		return responseInfo{}, fmt.Errorf("contact ClickTime: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
