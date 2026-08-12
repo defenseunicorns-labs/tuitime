@@ -75,6 +75,12 @@ type Me struct {
 	Email     string `json:"Email"`
 }
 
+type Company struct {
+	ID                   string `json:"ID"`
+	Name                 string `json:"Name"`
+	AttestationStatement string `json:"AttestationStatement"`
+}
+
 func (m Me) DisplayName() string {
 	if strings.TrimSpace(m.Name) != "" {
 		return m.Name
@@ -161,7 +167,7 @@ type TimeOffEntry struct {
 	TimeOffEntryID string `json:"TimeOffEntryID"`
 	Date           string `json:"Date"`
 	Hours          Number `json:"Hours"`
-	Comment        string `json:"Comment"`
+	Notes          string `json:"Notes"`
 	TimeOffTypeID  string `json:"TimeOffTypeID"`
 }
 
@@ -185,6 +191,35 @@ func (e TimeEntry) Key() string {
 	return firstNonEmpty(e.ID, e.TimeEntryID)
 }
 
+type Timesheet struct {
+	ID               string              `json:"ID"`
+	StartDate        string              `json:"StartDate"`
+	EndDate          string              `json:"EndDate"`
+	Status           string              `json:"Status"`
+	Comment          string              `json:"Comment"`
+	SubmittedDate    string              `json:"SubmittedDate"`
+	HasBeenSubmitted bool                `json:"HasBeenSubmitted"`
+	DayTotals        []TimesheetDayTotal `json:"DayTotals"`
+	Actions          []TimesheetAction   `json:"Actions"`
+}
+
+type TimesheetDayTotal struct {
+	Date  string `json:"Date"`
+	Hours Number `json:"Hours"`
+}
+
+type TimesheetAction struct {
+	Action string `json:"Action"`
+}
+
+func (t Timesheet) TotalHours() float64 {
+	var total float64
+	for _, day := range t.DayTotals {
+		total += float64(day.Hours)
+	}
+	return total
+}
+
 // TimeEntryInput is the standard ClickTime time-entry payload. ClickTime calls
 // projects "Jobs" in its REST API.
 type TimeEntryInput struct {
@@ -199,7 +234,19 @@ type TimeOffInput struct {
 	Date          string  `json:"Date"`
 	Hours         float64 `json:"Hours"`
 	TimeOffTypeID string  `json:"TimeOffTypeID"`
-	Comment       string  `json:"Comment"`
+	Notes         string  `json:"Notes"`
+}
+
+type TimeOffUpdateInput struct {
+	Hours         float64 `json:"Hours"`
+	TimeOffTypeID string  `json:"TimeOffTypeID"`
+	Notes         string  `json:"Notes"`
+}
+
+type TimesheetSubmitInput struct {
+	Comment         string
+	CCNotifications []string
+	HasAttestation  bool
 }
 
 type APIError struct {
@@ -211,28 +258,70 @@ func (e *APIError) Error() string {
 	message := strings.Join(e.Messages, "; ")
 	if message == "" {
 		message = http.StatusText(e.StatusCode)
+		if e.StatusCode >= 200 && e.StatusCode < 300 {
+			message = "unknown error"
+		}
 	}
-	if e.StatusCode == 0 {
+	switch {
+	case e.StatusCode == 0:
 		return message
+	case e.StatusCode >= 200 && e.StatusCode < 300:
+		return "ClickTime API reported an error: " + message
+	default:
+		return fmt.Sprintf("ClickTime API returned %d: %s", e.StatusCode, message)
 	}
-	return fmt.Sprintf("ClickTime API returned %d: %s", e.StatusCode, message)
 }
 
 type responseEnvelope struct {
 	Data   json.RawMessage `json:"data"`
 	Errors []apiMessage    `json:"errors"`
+	Meta   json.RawMessage `json:"meta"`
+	Page   responsePage    `json:"page"`
+}
+
+type responseInfo struct {
+	Meta json.RawMessage
+	Page responsePage
+}
+
+type responsePage struct {
+	Count  *int              `json:"count"`
+	Limit  *int              `json:"limit"`
+	Offset *int              `json:"offset"`
+	Links  responsePageLinks `json:"links"`
+}
+
+type responsePageLinks struct {
+	Next string `json:"next"`
 }
 
 type apiMessage struct {
-	Message string `json:"Message"`
-	Detail  string `json:"Detail"`
-	Title   string `json:"Title"`
+	Field         string   `json:"Field"`
+	Message       string   `json:"Message"`
+	MessageDetail []string `json:"MessageDetail"`
+	Detail        string   `json:"Detail"`
+	Title         string   `json:"Title"`
 }
 
 func (e responseEnvelope) messages() []string {
 	messages := make([]string, 0, len(e.Errors))
 	for _, item := range e.Errors {
-		if message := firstNonEmpty(item.Message, item.Detail, item.Title); message != "" {
+		message := firstNonEmpty(item.Message, item.Detail, item.Title)
+		details := nonEmptyStrings(item.MessageDetail)
+		if message == "" && len(details) > 0 {
+			message, details = details[0], details[1:]
+		}
+		if field := strings.TrimSpace(item.Field); field != "" {
+			if message == "" {
+				message = field
+			} else {
+				message = field + ": " + message
+			}
+		}
+		if len(details) > 0 {
+			message += " (" + strings.Join(details, "; ") + ")"
+		}
+		if message != "" {
 			messages = append(messages, message)
 		}
 	}
@@ -245,32 +334,30 @@ func (c *Client) Me(ctx context.Context) (Me, error) {
 	return result, err
 }
 
-func (c *Client) Clients(ctx context.Context) ([]ClientResource, error) {
-	var result []ClientResource
-	query := url.Values{"IsActive": {"true"}, "limit": {"1000"}}
-	err := c.request(ctx, http.MethodGet, "/Me/Clients", query, nil, &result)
+func (c *Client) Company(ctx context.Context) (Company, error) {
+	var result Company
+	err := c.request(ctx, http.MethodGet, "/Company", nil, nil, &result)
 	return result, err
+}
+
+func (c *Client) Clients(ctx context.Context) ([]ClientResource, error) {
+	query := url.Values{"IsActive": {"true"}, "limit": {"1000"}}
+	return requestAll[ClientResource](ctx, c, "/Me/Clients", query)
 }
 
 func (c *Client) Jobs(ctx context.Context) ([]Job, error) {
-	var result []Job
 	query := url.Values{"IsActive": {"true"}, "limit": {"1000"}}
-	err := c.request(ctx, http.MethodGet, "/Me/Jobs", query, nil, &result)
-	return result, err
+	return requestAll[Job](ctx, c, "/Me/Jobs", query)
 }
 
 func (c *Client) Tasks(ctx context.Context) ([]Task, error) {
-	var result []Task
 	query := url.Values{"IsActive": {"true"}, "limit": {"1000"}}
-	err := c.request(ctx, http.MethodGet, "/Me/Tasks", query, nil, &result)
-	return result, err
+	return requestAll[Task](ctx, c, "/Me/Tasks", query)
 }
 
 func (c *Client) TimeOffTypes(ctx context.Context) ([]TimeOffType, error) {
-	var result []TimeOffType
 	query := url.Values{"IsActive": {"true"}, "limit": {"1000"}}
-	err := c.request(ctx, http.MethodGet, "/Me/TimeOffTypes", query, nil, &result)
-	return result, err
+	return requestAll[TimeOffType](ctx, c, "/Me/TimeOffTypes", query)
 }
 
 func (c *Client) TasksForJob(ctx context.Context, jobID string) ([]Task, error) {
@@ -278,31 +365,78 @@ func (c *Client) TasksForJob(ctx context.Context, jobID string) ([]Task, error) 
 		return nil, errors.New("job ID is required")
 	}
 	var result []Task
-	query := url.Values{"IsActive": {"true"}, "limit": {"1000"}}
+	query := url.Values{"IsActive": {"true"}}
 	path := "/Me/Jobs/" + url.PathEscape(jobID) + "/Tasks"
 	err := c.request(ctx, http.MethodGet, path, query, nil, &result)
 	return result, err
 }
 
 func (c *Client) TimeEntries(ctx context.Context, start, end time.Time) ([]TimeEntry, error) {
-	var result []TimeEntry
 	query := url.Values{
 		"StartDate": {start.Format(time.DateOnly)},
 		"EndDate":   {end.Format(time.DateOnly)},
 		"limit":     {"100"},
 	}
-	err := c.request(ctx, http.MethodGet, "/Me/TimeEntries", query, nil, &result)
-	return result, err
+	return requestAll[TimeEntry](ctx, c, "/Me/TimeEntries", query)
 }
 
 func (c *Client) TimeOff(ctx context.Context, start, end time.Time) ([]TimeOffEntry, error) {
-	var result []TimeOffEntry
 	query := url.Values{
-		"StartDate": {start.Format(time.DateOnly)},
-		"EndDate":   {end.Format(time.DateOnly)},
-		"limit":     {"100"},
+		"FromDate": {start.Format(time.DateOnly)},
+		"ToDate":   {end.Format(time.DateOnly)},
+		"limit":    {"1000"},
 	}
-	err := c.request(ctx, http.MethodGet, "/Me/TimeOff", query, nil, &result)
+	return requestAll[TimeOffEntry](ctx, c, "/Me/TimeOff", query)
+}
+
+func (c *Client) Timesheets(ctx context.Context, start, end time.Time) ([]Timesheet, error) {
+	query := url.Values{
+		"FromDate": {start.Format(time.DateOnly)},
+		"ToDate":   {end.Format(time.DateOnly)},
+		"limit":    {"1000"},
+	}
+	return requestAll[Timesheet](ctx, c, "/Me/Timesheets", query)
+}
+
+func (c *Client) TimesheetForDate(ctx context.Context, date time.Time) (Timesheet, error) {
+	if date.IsZero() {
+		return Timesheet{}, errors.New("timesheet date is required")
+	}
+	var result Timesheet
+	path := "/Me/Timesheets/" + date.Format(time.DateOnly)
+	query := url.Values{"verbose": {"true"}}
+	err := c.request(ctx, http.MethodGet, path, query, nil, &result)
+	return result, err
+}
+
+func (c *Client) TimesheetActions(ctx context.Context, timesheetID string) ([]TimesheetAction, error) {
+	if strings.TrimSpace(timesheetID) == "" {
+		return nil, errors.New("timesheet ID is required")
+	}
+	var result []TimesheetAction
+	path := "/Me/Timesheets/" + url.PathEscape(timesheetID) + "/Actions"
+	err := c.request(ctx, http.MethodGet, path, nil, nil, &result)
+	return result, err
+}
+
+func (c *Client) SubmitTimesheet(ctx context.Context, timesheetID string, input TimesheetSubmitInput) (Timesheet, error) {
+	if strings.TrimSpace(timesheetID) == "" {
+		return Timesheet{}, errors.New("timesheet ID is required")
+	}
+	payload := struct {
+		Action          string   `json:"Action"`
+		Comment         string   `json:"Comment,omitempty"`
+		CCNotifications []string `json:"CCNotifications,omitempty"`
+		HasAttestation  bool     `json:"HasAttestation,omitempty"`
+	}{
+		Action:          "Submit",
+		Comment:         strings.TrimSpace(input.Comment),
+		CCNotifications: input.CCNotifications,
+		HasAttestation:  input.HasAttestation,
+	}
+	var result Timesheet
+	path := "/Me/Timesheets/" + url.PathEscape(timesheetID) + "/Actions"
+	err := c.request(ctx, http.MethodPost, path, nil, payload, &result)
 	return result, err
 }
 
@@ -328,7 +462,7 @@ func (c *Client) CreateTimeOff(ctx context.Context, input TimeOffInput) (TimeOff
 	return result, err
 }
 
-func (c *Client) UpdateTimeOff(ctx context.Context, entryID string, input TimeOffInput) (TimeOffEntry, error) {
+func (c *Client) UpdateTimeOff(ctx context.Context, entryID string, input TimeOffUpdateInput) (TimeOffEntry, error) {
 	if strings.TrimSpace(entryID) == "" {
 		return TimeOffEntry{}, errors.New("time off entry ID is required")
 	}
@@ -338,7 +472,68 @@ func (c *Client) UpdateTimeOff(ctx context.Context, entryID string, input TimeOf
 	return result, err
 }
 
+func requestAll[T any](ctx context.Context, client *Client, path string, query url.Values) ([]T, error) {
+	pageQuery := make(url.Values, len(query)+1)
+	for key, values := range query {
+		pageQuery[key] = append([]string(nil), values...)
+	}
+
+	offset, err := strconv.Atoi(pageQuery.Get("offset"))
+	if err != nil || offset < 0 {
+		offset = 0
+	}
+	pageQuery.Set("offset", strconv.Itoa(offset))
+
+	var result []T
+	for {
+		var items []T
+		info, err := client.requestWithInfo(ctx, http.MethodGet, path, pageQuery, nil, &items)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, items...)
+		if len(items) == 0 {
+			return result, nil
+		}
+
+		currentOffset := offset
+		if info.Page.Offset != nil {
+			currentOffset = *info.Page.Offset
+		}
+		step := len(items)
+		if info.Page.Limit != nil && *info.Page.Limit > 0 {
+			step = *info.Page.Limit
+		}
+		nextOffset := currentOffset + step
+		if !info.Page.hasNext(nextOffset) {
+			return result, nil
+		}
+		if nextOffset <= offset {
+			return nil, errors.New("ClickTime returned invalid pagination metadata")
+		}
+		offset = nextOffset
+		pageQuery.Set("offset", strconv.Itoa(offset))
+	}
+}
+
+func (p responsePage) hasNext(nextOffset int) bool {
+	if p.Count != nil {
+		return nextOffset < *p.Count
+	}
+	return strings.TrimSpace(p.Links.Next) != ""
+}
+
 func (c *Client) request(ctx context.Context, method, path string, query url.Values, body, result any) error {
+	_, err := c.requestWithMeta(ctx, method, path, query, body, result)
+	return err
+}
+
+func (c *Client) requestWithMeta(ctx context.Context, method, path string, query url.Values, body, result any) (json.RawMessage, error) {
+	info, err := c.requestWithInfo(ctx, method, path, query, body, result)
+	return info.Meta, err
+}
+
+func (c *Client) requestWithInfo(ctx context.Context, method, path string, query url.Values, body, result any) (responseInfo, error) {
 	endpoint := c.baseURL + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
@@ -348,14 +543,14 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("encode ClickTime request: %w", err)
+			return responseInfo{}, fmt.Errorf("encode ClickTime request: %w", err)
 		}
 		reader = bytes.NewReader(encoded)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
-		return fmt.Errorf("create ClickTime request: %w", err)
+		return responseInfo{}, fmt.Errorf("create ClickTime request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
@@ -363,38 +558,41 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("contact ClickTime: %w", err)
+		return responseInfo{}, fmt.Errorf("contact ClickTime: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return fmt.Errorf("read ClickTime response: %w", err)
+		return responseInfo{}, fmt.Errorf("read ClickTime response: %w", err)
 	}
 	if resp.StatusCode == http.StatusNoContent || len(bytes.TrimSpace(payload)) == 0 {
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil
+			return responseInfo{}, nil
 		}
-		return &APIError{StatusCode: resp.StatusCode}
+		return responseInfo{}, &APIError{StatusCode: resp.StatusCode}
 	}
 
 	var envelope responseEnvelope
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return &APIError{StatusCode: resp.StatusCode, Messages: []string{strings.TrimSpace(string(payload))}}
+			return responseInfo{}, &APIError{StatusCode: resp.StatusCode, Messages: []string{strings.TrimSpace(string(payload))}}
 		}
-		return fmt.Errorf("decode ClickTime response: %w", err)
+		return responseInfo{}, fmt.Errorf("decode ClickTime response: %w", err)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{StatusCode: resp.StatusCode, Messages: envelope.messages()}
+	info := responseInfo{Meta: envelope.Meta, Page: envelope.Page}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || len(envelope.Errors) > 0 {
+		return info, &APIError{StatusCode: resp.StatusCode, Messages: envelope.messages()}
 	}
 	if result == nil || len(envelope.Data) == 0 || string(envelope.Data) == "null" {
-		return nil
+		return info, nil
 	}
 	if err := json.Unmarshal(envelope.Data, result); err != nil {
-		return fmt.Errorf("decode ClickTime data: %w", err)
+		return info, fmt.Errorf("decode ClickTime data: %w", err)
 	}
-	return nil
+	return info, nil
 }
 
 func firstNonEmpty(values ...string) string {
@@ -404,4 +602,14 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func nonEmptyStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }

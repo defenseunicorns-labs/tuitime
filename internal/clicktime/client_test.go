@@ -13,21 +13,32 @@ import (
 func TestTimeEntries(t *testing.T) {
 	t.Parallel()
 
+	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
 		if got := r.Header.Get("Authorization"); got != "Token secret" {
 			t.Errorf("Authorization = %q", got)
 		}
 		if got := r.URL.Path; got != "/v2/Me/TimeEntries" {
 			t.Errorf("path = %q", got)
 		}
-		if got := r.URL.Query().Get("StartDate"); got != "2026-07-27" {
+		query := r.URL.Query()
+		if got := query.Get("StartDate"); got != "2026-07-27" {
 			t.Errorf("StartDate = %q", got)
 		}
-		if got := r.URL.Query().Get("EndDate"); got != "2026-08-02" {
+		if got := query.Get("EndDate"); got != "2026-08-02" {
 			t.Errorf("EndDate = %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"ID":"entry-1","Date":"2026-07-27","Hours":"7.5","JobID":"job-1","TaskID":"task-1"}],"errors":[]}`))
+		switch query.Get("offset") {
+		case "0":
+			_, _ = w.Write([]byte(`{"data":[{"ID":"entry-1","Date":"2026-07-27","Hours":"7.5","JobID":"job-1","TaskID":"task-1"}],"errors":[],"page":{"count":2,"limit":1,"offset":0}}`))
+		case "1":
+			_, _ = w.Write([]byte(`{"data":[{"ID":"entry-2","Date":"2026-07-28","Hours":8,"JobID":"job-1","TaskID":"task-1"}],"errors":[],"page":{"count":2,"limit":1,"offset":1}}`))
+		default:
+			t.Errorf("unexpected offset = %q", query.Get("offset"))
+			http.Error(w, "unexpected offset", http.StatusBadRequest)
+		}
 	}))
 	defer server.Close()
 
@@ -37,8 +48,209 @@ func TestTimeEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TimeEntries() error = %v", err)
 	}
-	if len(entries) != 1 || entries[0].Key() != "entry-1" || float64(entries[0].Hours) != 7.5 {
+	if len(entries) != 2 || entries[0].Key() != "entry-1" || float64(entries[0].Hours) != 7.5 || entries[1].Key() != "entry-2" {
 		t.Fatalf("TimeEntries() = %#v", entries)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
+func TestTimesheets(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Me/Timesheets" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		query := r.URL.Query()
+		if query.Get("FromDate") != "2026-07-13" || query.Get("ToDate") != "2026-07-19" {
+			t.Errorf("timesheet dates = %s", r.URL.RawQuery)
+		}
+		if query.Get("limit") != "1000" || query.Get("offset") != "0" {
+			t.Errorf("timesheet pagination = %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"ID":"sheet-1","StartDate":"2026-07-13","EndDate":"2026-07-16","Status":"Open","HasBeenSubmitted":false},{"ID":"sheet-2","StartDate":"2026-07-17","EndDate":"2026-07-23","Status":"Waiting","HasBeenSubmitted":true}],"errors":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	start := time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC)
+	timesheets, err := client.Timesheets(context.Background(), start, start.AddDate(0, 0, 6))
+	if err != nil {
+		t.Fatalf("Timesheets() error = %v", err)
+	}
+	if len(timesheets) != 2 || timesheets[0].ID != "sheet-1" || timesheets[0].EndDate != "2026-07-16" {
+		t.Fatalf("Timesheets() = %#v", timesheets)
+	}
+	if timesheets[1].Status != "Waiting" || !timesheets[1].HasBeenSubmitted {
+		t.Fatalf("Timesheets()[1] = %#v", timesheets[1])
+	}
+}
+
+func TestTimesheetSubmissionAPI(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/Timesheets/2026-07-15":
+			if r.URL.Query().Get("verbose") != "true" {
+				t.Errorf("timesheet query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":{"ID":"sheet-1","StartDate":"2026-07-13","EndDate":"2026-07-19","Status":"Open","HasBeenSubmitted":false,"DayTotals":[{"Date":"2026-07-13","Hours":"7.5"},{"Date":"2026-07-14","Hours":8}],"Actions":[{"Action":"Submit"}]},"errors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/Timesheets/sheet-1/Actions":
+			if r.URL.RawQuery != "" {
+				t.Errorf("timesheet actions query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":[{"Action":"Submit"}],"errors":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/Me/Timesheets/sheet-1/Actions":
+			var input struct {
+				Action          string   `json:"Action"`
+				Comment         string   `json:"Comment"`
+				CCNotifications []string `json:"CCNotifications"`
+				HasAttestation  bool     `json:"HasAttestation"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatalf("decode submit body: %v", err)
+			}
+			if input.Action != "Submit" || input.Comment != "Ready for review" || !input.HasAttestation {
+				t.Errorf("submit body = %#v", input)
+			}
+			if len(input.CCNotifications) != 1 || input.CCNotifications[0] != "manager@example.com" {
+				t.Errorf("CCNotifications = %#v", input.CCNotifications)
+			}
+			_, _ = w.Write([]byte(`{"data":{"ID":"sheet-1","StartDate":"2026-07-13","EndDate":"2026-07-19","Status":"Waiting","HasBeenSubmitted":true,"SubmittedDate":"2026-07-19"},"errors":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	date := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	timesheet, err := client.TimesheetForDate(context.Background(), date)
+	if err != nil {
+		t.Fatalf("TimesheetForDate() error = %v", err)
+	}
+	if timesheet.ID != "sheet-1" || timesheet.Status != "Open" || timesheet.TotalHours() != 15.5 {
+		t.Fatalf("TimesheetForDate() = %#v, total = %v", timesheet, timesheet.TotalHours())
+	}
+	if len(timesheet.Actions) != 1 || timesheet.Actions[0].Action != "Submit" {
+		t.Fatalf("TimesheetForDate() actions = %#v", timesheet.Actions)
+	}
+
+	actions, err := client.TimesheetActions(context.Background(), timesheet.ID)
+	if err != nil {
+		t.Fatalf("TimesheetActions() error = %v", err)
+	}
+	if len(actions) != 1 || actions[0].Action != "Submit" {
+		t.Fatalf("TimesheetActions() = %#v", actions)
+	}
+
+	submitted, err := client.SubmitTimesheet(context.Background(), timesheet.ID, TimesheetSubmitInput{
+		Comment: " Ready for review ", CCNotifications: []string{"manager@example.com"}, HasAttestation: true,
+	})
+	if err != nil {
+		t.Fatalf("SubmitTimesheet() error = %v", err)
+	}
+	if submitted.ID != "sheet-1" || submitted.Status != "Waiting" || !submitted.HasBeenSubmitted {
+		t.Fatalf("SubmitTimesheet() = %#v", submitted)
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
+	}
+}
+
+func TestTimesheetSubmissionRequiresTarget(t *testing.T) {
+	t.Parallel()
+
+	client := New("secret")
+	if _, err := client.TimesheetForDate(context.Background(), time.Time{}); err == nil {
+		t.Fatal("TimesheetForDate() error = nil")
+	}
+	if _, err := client.TimesheetActions(context.Background(), ""); err == nil {
+		t.Fatal("TimesheetActions() error = nil")
+	}
+	if _, err := client.SubmitTimesheet(context.Background(), "", TimesheetSubmitInput{}); err == nil {
+		t.Fatal("SubmitTimesheet() error = nil")
+	}
+}
+
+func TestPaginationUsesNextLinkWithoutCount(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Get("IsActive") != "true" || query.Get("limit") != "1000" {
+			t.Errorf("clients query = %s", r.URL.RawQuery)
+		}
+		switch query.Get("offset") {
+		case "0":
+			_, _ = w.Write([]byte(`{"data":[{"ID":"client-1","Name":"First"}],"errors":[],"page":{"limit":1,"offset":0,"links":{"next":"https://api.clicktime.com/v2/Me/Clients?offset=1"}}}`))
+		case "1":
+			_, _ = w.Write([]byte(`{"data":[{"ID":"client-2","Name":"Second"}],"errors":[],"page":{"limit":1,"offset":1,"links":{"next":null}}}`))
+		default:
+			http.Error(w, "unexpected offset", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	clients, err := client.Clients(context.Background())
+	if err != nil {
+		t.Fatalf("Clients() error = %v", err)
+	}
+	if len(clients) != 2 || clients[0].ID != "client-1" || clients[1].ID != "client-2" {
+		t.Fatalf("Clients() = %#v", clients)
+	}
+}
+
+func TestPaginationDiscardsPartialResultsOnFailure(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("offset") {
+		case "0":
+			_, _ = w.Write([]byte(`{"data":[{"ID":"client-1","Name":"First"}],"errors":[],"page":{"count":2,"limit":1,"offset":0}}`))
+		case "1":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"data":null,"errors":[{"Message":"PaginationFailed"}]}`))
+		default:
+			http.Error(w, "unexpected offset", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	clients, err := client.Clients(context.Background())
+	if err == nil {
+		t.Fatal("Clients() error = nil")
+	}
+	if clients != nil {
+		t.Fatalf("Clients() = %#v, want nil after a page failure", clients)
+	}
+}
+
+func TestCompany(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/Company" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":{"ID":"company-1","Name":"Acme","AttestationStatement":"I certify this timesheet is accurate."},"errors":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	company, err := client.Company(context.Background())
+	if err != nil {
+		t.Fatalf("Company() error = %v", err)
+	}
+	if company.ID != "company-1" || company.AttestationStatement != "I certify this timesheet is accurate." {
+		t.Fatalf("Company() = %#v", company)
 	}
 }
 
@@ -80,8 +292,8 @@ func TestAPIError(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"data":null,"errors":[{"Message":"Invalid Credentials"}]}`))
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"data":null,"errors":[{"Field":"Hours","Message":"InvalidHours","MessageDetail":["Hours must not exceed 24","Received: 25"]}]}`))
 	}))
 	defer server.Close()
 
@@ -91,8 +303,57 @@ func TestAPIError(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("Me() error = %v, want *APIError", err)
 	}
-	if apiErr.StatusCode != http.StatusUnauthorized || apiErr.Error() != "ClickTime API returned 401: Invalid Credentials" {
-		t.Fatalf("APIError = %#v (%v)", apiErr, apiErr)
+	want := "ClickTime API returned 400: Hours: InvalidHours (Hours must not exceed 24; Received: 25)"
+	if apiErr.StatusCode != http.StatusBadRequest || apiErr.Error() != want {
+		t.Fatalf("APIError = %#v (%v), want %q", apiErr, apiErr, want)
+	}
+}
+
+func TestAPIErrorOnSuccessfulResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"ID":"me-1"},"errors":[{"Message":"PartialFailure","MessageDetail":["A submitted property was ignored"]}]}`))
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	_, err := client.Me(context.Background())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("Me() error = %v, want *APIError", err)
+	}
+	want := "ClickTime API reported an error: PartialFailure (A submitted property was ignored)"
+	if apiErr.StatusCode != http.StatusOK || apiErr.Error() != want {
+		t.Fatalf("APIError = %#v (%v), want %q", apiErr, apiErr, want)
+	}
+}
+
+func TestRequestPreservesResponseMetadata(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"ID":"me-1"},"errors":[],"meta":{"Warnings":["A read-only property was ignored"]}}`))
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	var me Me
+	meta, err := client.requestWithMeta(context.Background(), http.MethodGet, "/Me", nil, nil, &me)
+	if err != nil {
+		t.Fatalf("requestWithMeta() error = %v", err)
+	}
+	if me.ID != "me-1" {
+		t.Fatalf("requestWithMeta() result = %#v", me)
+	}
+	var metadata struct {
+		Warnings []string `json:"Warnings"`
+	}
+	if err := json.Unmarshal(meta, &metadata); err != nil {
+		t.Fatalf("decode metadata: %v", err)
+	}
+	if len(metadata.Warnings) != 1 || metadata.Warnings[0] != "A read-only property was ignored" {
+		t.Fatalf("metadata = %#v", metadata)
 	}
 }
 
@@ -106,20 +367,36 @@ func TestTimeOff(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/Me/TimeOffTypes":
 			_, _ = w.Write([]byte(`{"data":[{"ID":"vacation","Name":"Vacation"}],"errors":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/Me/TimeOff":
-			if r.URL.Query().Get("StartDate") != "2026-07-27" || r.URL.Query().Get("EndDate") != "2026-08-02" {
+			query := r.URL.Query()
+			if query.Get("FromDate") != "2026-07-27" || query.Get("ToDate") != "2026-08-02" {
 				t.Errorf("time off query = %s", r.URL.RawQuery)
 			}
-			_, _ = w.Write([]byte(`{"data":[{"ID":"off-1","Date":"2026-07-29","Hours":8,"TimeOffTypeID":"vacation"}],"errors":[]}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/Me/TimeOff":
-			var input TimeOffInput
-			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-				t.Fatalf("decode time off body: %v", err)
+			if query.Get("limit") != "1000" || query.Get("offset") != "0" {
+				t.Errorf("time off pagination = %s", r.URL.RawQuery)
 			}
-			if input.TimeOffTypeID != "vacation" || input.Date != "2026-07-29" || input.Hours != 8 {
-				t.Errorf("time off body = %#v", input)
+			if query.Has("StartDate") || query.Has("EndDate") {
+				t.Errorf("time off query uses unsupported date filters: %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":[{"ID":"off-1","Date":"2026-07-29","Hours":8,"Notes":"Summer break","TimeOffTypeID":"vacation"}],"errors":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/Me/TimeOff":
+			input := decodeJSONBody(t, r)
+			if input["TimeOffTypeID"] != "vacation" || input["Date"] != "2026-07-29" || input["Hours"] != float64(8) || input["Notes"] != "Summer break" {
+				t.Errorf("create time off body = %#v", input)
+			}
+			if _, exists := input["Comment"]; exists {
+				t.Errorf("create time off body contains unsupported Comment field: %#v", input)
 			}
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"data":{"ID":"off-1"},"errors":[]}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/Me/TimeOff/off-1":
+			input := decodeJSONBody(t, r)
+			if input["TimeOffTypeID"] != "vacation" || input["Hours"] != float64(4) || input["Notes"] != "Half day" {
+				t.Errorf("update time off body = %#v", input)
+			}
+			if _, exists := input["Date"]; exists {
+				t.Errorf("update time off body contains read-only Date field: %#v", input)
+			}
+			_, _ = w.Write([]byte(`{"data":{"ID":"off-1","Date":"2026-07-29","Hours":4,"Notes":"Half day","TimeOffTypeID":"vacation"},"errors":[]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -133,18 +410,33 @@ func TestTimeOff(t *testing.T) {
 	}
 	start := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
 	entries, err := client.TimeOff(context.Background(), start, start.AddDate(0, 0, 6))
-	if err != nil || len(entries) != 1 || entries[0].Key() != "off-1" {
+	if err != nil || len(entries) != 1 || entries[0].Key() != "off-1" || entries[0].Notes != "Summer break" {
 		t.Fatalf("TimeOff() = %#v, %v", entries, err)
 	}
 	entry, err := client.CreateTimeOff(context.Background(), TimeOffInput{
-		Date: "2026-07-29", Hours: 8, TimeOffTypeID: "vacation",
+		Date: "2026-07-29", Hours: 8, TimeOffTypeID: "vacation", Notes: "Summer break",
 	})
 	if err != nil || entry.Key() != "off-1" {
 		t.Fatalf("CreateTimeOff() = %#v, %v", entry, err)
 	}
-	if requests != 3 {
-		t.Fatalf("requests = %d, want 3", requests)
+	entry, err = client.UpdateTimeOff(context.Background(), "off-1", TimeOffUpdateInput{
+		Hours: 4, TimeOffTypeID: "vacation", Notes: "Half day",
+	})
+	if err != nil || entry.Key() != "off-1" || entry.Notes != "Half day" {
+		t.Fatalf("UpdateTimeOff() = %#v, %v", entry, err)
 	}
+	if requests != 4 {
+		t.Fatalf("requests = %d, want 4", requests)
+	}
+}
+
+func decodeJSONBody(t *testing.T, r *http.Request) map[string]any {
+	t.Helper()
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	return body
 }
 
 func TestTasksForJobAcceptsTaskIDs(t *testing.T) {

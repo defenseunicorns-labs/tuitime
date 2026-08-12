@@ -30,6 +30,12 @@ var (
 	successStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#047857", Dark: "#6EE7B7"})
 
+	warningStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "#A16207", Dark: "#FACC15"})
+
+	pendingStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#7DD3FC"})
+
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#B91C1C", Dark: "#FCA5A5"})
 

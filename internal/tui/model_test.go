@@ -1,10 +1,15 @@
 package tui
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -208,7 +213,7 @@ func TestTimeOffRowsAndTotals(t *testing.T) {
 		weekStart:    week,
 		timeOffTypes: []clicktime.TimeOffType{{ID: "vacation", Name: "Vacation"}},
 		timeOffEntries: []clicktime.TimeOffEntry{{
-			ID: "off-1", Date: "2026-07-29", Hours: 8, TimeOffTypeID: "vacation", Comment: "Summer break",
+			ID: "off-1", Date: "2026-07-29", Hours: 8, TimeOffTypeID: "vacation", Notes: "Summer break",
 		}},
 	}
 	rows := model.timesheetRows()
@@ -219,6 +224,9 @@ func TestTimeOffRowsAndTotals(t *testing.T) {
 	entries := model.selectedEntries()
 	if len(entries) != 1 || entries[0].kind != timeOffEntry || entries[0].timeOff.Key() != "off-1" {
 		t.Fatalf("selectedEntries() = %#v", entries)
+	}
+	if entries[0].comment() != "Summer break" {
+		t.Fatalf("time off notes = %q, want %q", entries[0].comment(), "Summer break")
 	}
 	if model.weekTotal() != 8 || model.totalForDate(week.AddDate(0, 0, 2)) != 8 {
 		t.Fatalf("time off totals: week=%v day=%v", model.weekTotal(), model.totalForDate(week.AddDate(0, 0, 2)))
@@ -274,6 +282,176 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	if got := updated.(Model).weekStart.Format(time.DateOnly); got != "2026-08-03" {
 		t.Fatalf("] week = %s, want 2026-08-03", got)
 	}
+}
+
+func TestSpinnerRunsOnlyOnLoadingScreens(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return now })
+	model.screen = screenDashboard
+
+	before := model.spinner.View()
+	updated, cmd := model.Update(model.spinner.Tick())
+	dashboard := updated.(Model)
+	if cmd != nil {
+		t.Fatal("spinner scheduled another tick on the dashboard")
+	}
+	if dashboard.spinner.View() != before {
+		t.Fatalf("dashboard spinner advanced from %q to %q", before, dashboard.spinner.View())
+	}
+
+	updated, cmd = dashboard.changeWeek(7)
+	loading := updated.(Model)
+	if !loading.spinnerActive() || cmd == nil {
+		t.Fatalf("changeWeek() screen = %v, cmd = %v", loading.screen, cmd)
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("changeWeek() command = %#v, want spinner and load commands", cmd())
+	}
+	if _, ok := batch[0]().(spinner.TickMsg); !ok {
+		t.Fatalf("first loading command = %#v, want spinner.TickMsg", batch[0]())
+	}
+
+	before = loading.spinner.View()
+	updated, cmd = loading.Update(loading.spinner.Tick())
+	loading = updated.(Model)
+	if cmd == nil {
+		t.Fatal("spinner did not schedule another tick while loading")
+	}
+	if loading.spinner.View() == before {
+		t.Fatalf("loading spinner did not advance from %q", before)
+	}
+}
+
+func TestTimesheetSubmissionFlow(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/Timesheets/2026-07-15":
+			if r.URL.Query().Get("verbose") != "true" {
+				t.Errorf("timesheet query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":{"ID":"sheet-1","StartDate":"2026-07-01","EndDate":"2026-07-15","Status":"Open","DayTotals":[{"Date":"2026-07-01","Hours":8},{"Date":"2026-07-02","Hours":8},{"Date":"2026-07-03","Hours":8},{"Date":"2026-07-06","Hours":8},{"Date":"2026-07-07","Hours":8}]},"errors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/Timesheets/sheet-1/Actions":
+			_, _ = w.Write([]byte(`{"data":[{"Action":"Submit"}],"errors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/Company":
+			_, _ = w.Write([]byte(`{"data":{"ID":"company-1","AttestationStatement":"I certify that these hours are complete and accurate."},"errors":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/Me/Timesheets/sheet-1/Actions":
+			var input struct {
+				Action         string `json:"Action"`
+				HasAttestation bool   `json:"HasAttestation"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatalf("decode submit body: %v", err)
+			}
+			if input.Action != "Submit" || !input.HasAttestation {
+				t.Errorf("submit body = %#v", input)
+			}
+			_, _ = w.Write([]byte(`{"data":{"ID":"sheet-1","StartDate":"2026-07-01","EndDate":"2026-07-15","Status":"Waiting","HasBeenSubmitted":true},"errors":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	client := clicktime.NewWithBaseURL("secret", server.URL, server.Client())
+	model := NewAt(client, func() time.Time { return now })
+	model.screen = screenDashboard
+	model.weekStart = time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC)
+	model.dayCursor = 2
+	model.width, model.height = 100, 30
+
+	updated, cmd := model.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	loading := updated.(Model)
+	if loading.screen != screenTimesheetLoading || cmd == nil {
+		t.Fatalf("submit key screen = %v, cmd = %v", loading.screen, cmd)
+	}
+
+	updated, _ = loading.Update(nonSpinnerMessage(t, cmd))
+	review := updated.(Model)
+	if review.screen != screenTimesheetReview || review.timesheetToSubmit.ID != "sheet-1" {
+		t.Fatalf("timesheet review screen = %v, timesheet = %#v", review.screen, review.timesheetToSubmit)
+	}
+	view := review.View()
+	for _, text := range []string{"Submit this timesheet?", "Jul 1–15, 2026", "40.00", "entire period", "I certify that these hours are complete and accurate."} {
+		if !strings.Contains(view, text) {
+			t.Fatalf("timesheet review does not contain %q:\n%s", text, view)
+		}
+	}
+
+	updated, cmd = review.updateTimesheetReview(tea.KeyMsg{Type: tea.KeyEnter})
+	submitting := updated.(Model)
+	if submitting.screen != screenTimesheetSubmitting || cmd == nil {
+		t.Fatalf("confirm screen = %v, cmd = %v", submitting.screen, cmd)
+	}
+	updated, refreshCmd := submitting.Update(nonSpinnerMessage(t, cmd))
+	dashboardLoading := updated.(Model)
+	if dashboardLoading.screen != screenLoading || dashboardLoading.status != "Timesheet submitted for approval." || refreshCmd == nil {
+		t.Fatalf("submitted screen = %v, status = %q, cmd = %v", dashboardLoading.screen, dashboardLoading.status, refreshCmd)
+	}
+	if requests != 4 {
+		t.Fatalf("requests = %d, want 4", requests)
+	}
+}
+
+func TestTimesheetSubmissionRequiresAvailableAction(t *testing.T) {
+	t.Parallel()
+
+	model := NewAt(nil, time.Now)
+	model.screen = screenTimesheetLoading
+	updated, _ := model.Update(timesheetReadyMsg{
+		timesheet: clicktime.Timesheet{ID: "sheet-1", Status: "Waiting"},
+		actions:   []clicktime.TimesheetAction{{Action: "UndoSubmit"}},
+	})
+	dashboard := updated.(Model)
+	if dashboard.screen != screenDashboard || dashboard.lastError == nil {
+		t.Fatalf("unavailable action screen = %v, error = %v", dashboard.screen, dashboard.lastError)
+	}
+	if !strings.Contains(dashboard.lastError.Error(), "status: Waiting") {
+		t.Fatalf("unavailable action error = %q", dashboard.lastError)
+	}
+}
+
+func TestTimesheetSubmissionErrorReturnsToConfirmation(t *testing.T) {
+	t.Parallel()
+
+	model := NewAt(nil, time.Now)
+	model.screen = screenTimesheetSubmitting
+	model.timesheetToSubmit = clicktime.Timesheet{ID: "sheet-1"}
+	updated, _ := model.Update(operationErrorMsg{op: "submit timesheet", err: fmt.Errorf("submission blocked")})
+	review := updated.(Model)
+	if review.screen != screenTimesheetReview || review.lastError == nil {
+		t.Fatalf("submission error screen = %v, error = %v", review.screen, review.lastError)
+	}
+
+	updated, cmd := review.updateTimesheetReview(tea.KeyMsg{Type: tea.KeyEsc})
+	cancelled := updated.(Model)
+	if cancelled.screen != screenDashboard || cancelled.lastError != nil || cmd != nil {
+		t.Fatalf("cancel screen = %v, error = %v, cmd = %v", cancelled.screen, cancelled.lastError, cmd)
+	}
+}
+
+func nonSpinnerMessage(t *testing.T, cmd tea.Cmd) tea.Msg {
+	t.Helper()
+	message := cmd()
+	batch, ok := message.(tea.BatchMsg)
+	if !ok {
+		return message
+	}
+	for _, child := range batch {
+		message = child()
+		if _, isSpinner := message.(spinner.TickMsg); !isSpinner {
+			return message
+		}
+	}
+	t.Fatal("command batch contained only spinner ticks")
+	return nil
 }
 
 func TestEditEmptyProjectCellStartsNewEntryForSelectedRow(t *testing.T) {
@@ -457,7 +635,108 @@ func TestDashboardIsCenteredAndTabular(t *testing.T) {
 	}
 }
 
-func TestDashboardMarksTimesheetEnd(t *testing.T) {
+func TestLoadEntriesIncludesTimesheets(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Me/Timesheets":
+			_, _ = w.Write([]byte(`{"data":[{"ID":"sheet-1","StartDate":"2026-07-13","EndDate":"2026-07-16"}],"errors":[]}`))
+		case "/Me/TimeEntries", "/Me/TimeOff":
+			_, _ = w.Write([]byte(`{"data":[],"errors":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	week := time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC)
+	client := clicktime.NewWithBaseURL("secret", server.URL, server.Client())
+	message := loadEntriesCmd(client, week)()
+	loaded, ok := message.(entriesMsg)
+	if !ok {
+		t.Fatalf("loadEntriesCmd() = %#v, want entriesMsg", message)
+	}
+	if len(loaded.timesheets) != 1 || loaded.timesheets[0].EndDate != "2026-07-16" {
+		t.Fatalf("loadEntriesCmd() timesheets = %#v", loaded.timesheets)
+	}
+}
+
+func TestDashboardShowsTimesheetPeriodStatuses(t *testing.T) {
+	t.Parallel()
+
+	model := Model{
+		now:       func() time.Time { return time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC) },
+		width:     120,
+		height:    30,
+		screen:    screenDashboard,
+		weekStart: time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC),
+		timesheets: []clicktime.Timesheet{
+			{ID: "sheet-2", StartDate: "2026-07-16", EndDate: "2026-07-31", Status: "Open"},
+			{ID: "sheet-1", StartDate: "2026-07-01", EndDate: "2026-07-15", Status: "Waiting"},
+		},
+	}
+
+	view := model.View()
+	for _, text := range []string{"Timesheets", "› Jul 1–15", "◷ Submitted · awaiting approval", "Jul 16–31", "○ Open"} {
+		if !strings.Contains(view, text) {
+			t.Fatalf("dashboard does not contain %q:\n%s", text, view)
+		}
+	}
+	if strings.Index(view, "Jul 1–15") > strings.Index(view, "Jul 16–31") {
+		t.Fatalf("dashboard timesheets are not ordered by period:\n%s", view)
+	}
+
+	model.dayCursor = 3
+	view = model.View()
+	if !strings.Contains(view, "› Jul 16–31") || strings.Contains(view, "› Jul 1–15") {
+		t.Fatalf("dashboard does not highlight the selected day's period:\n%s", view)
+	}
+}
+
+func TestTimesheetContainsDateUsesCalendarDate(t *testing.T) {
+	t.Parallel()
+
+	period := clicktime.Timesheet{StartDate: "2026-07-01", EndDate: "2026-07-15"}
+	location := time.FixedZone("MDT", -6*60*60)
+	endDate := time.Date(2026, time.July, 15, 0, 0, 0, 0, location)
+	if !timesheetContainsDate(period, endDate) {
+		t.Fatal("timesheetContainsDate() excluded the period end in a non-UTC timezone")
+	}
+	if timesheetContainsDate(period, endDate.AddDate(0, 0, 1)) {
+		t.Fatal("timesheetContainsDate() included the day after the period")
+	}
+}
+
+func TestTimesheetStatusPresentation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		timesheet clicktime.Timesheet
+		want      string
+	}{
+		{name: "open", timesheet: clicktime.Timesheet{Status: "Open"}, want: "○ Open"},
+		{name: "waiting", timesheet: clicktime.Timesheet{Status: "Waiting"}, want: "◷ Submitted · awaiting approval"},
+		{name: "approved", timesheet: clicktime.Timesheet{Status: "Approved"}, want: "✓ Approved"},
+		{name: "rejected", timesheet: clicktime.Timesheet{Status: "Rejected"}, want: "! Rejected"},
+		{name: "unknown status", timesheet: clicktime.Timesheet{Status: "Locked"}, want: "? Locked"},
+		{name: "submit action fallback", timesheet: clicktime.Timesheet{Actions: []clicktime.TimesheetAction{{Action: "Submit"}}}, want: "○ Open"},
+		{name: "undo action fallback", timesheet: clicktime.Timesheet{Actions: []clicktime.TimesheetAction{{Action: "UndoSubmit"}}}, want: "◷ Submitted"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got, _ := timesheetStatus(test.timesheet)
+			if got != test.want {
+				t.Fatalf("timesheetStatus() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestDashboardMarksClickTimeTimesheetEnd(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
 	model := Model{
@@ -470,18 +749,19 @@ func TestDashboardMarksTimesheetEnd(t *testing.T) {
 			ID: "entry-1", Date: "2026-07-15", Hours: 8,
 			JobID: "job-1", TaskID: "task-1",
 		}},
-		jobs:  []clicktime.Job{{ID: "job-1", Name: "Apollo"}},
-		tasks: []clicktime.Task{{ID: "task-1", Name: "Labor"}},
+		jobs:       []clicktime.Job{{ID: "job-1", Name: "Apollo"}},
+		tasks:      []clicktime.Task{{ID: "task-1", Name: "Labor"}},
+		timesheets: []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-07-16T00:00:00Z"}},
 	}
 	view := model.View()
-	if !strings.Contains(view, "Wed 15※") {
-		t.Fatalf("dashboard does not mark today when it is a timesheet end:\n%s", view)
+	if !strings.Contains(view, "Wed 15*") || strings.Contains(view, "Wed 15※") {
+		t.Fatalf("dashboard does not mark today independently of the period end:\n%s", view)
 	}
-	if !strings.Contains(view, "+ timesheet end") {
-		t.Fatalf("dashboard does not explain timesheet end marker:\n%s", view)
+	if !strings.Contains(view, "Thu 16+") {
+		t.Fatalf("dashboard does not mark the ClickTime period end:\n%s", view)
 	}
-	if !strings.Contains(view, "※ today and timesheet end") {
-		t.Fatalf("dashboard does not explain combined marker:\n%s", view)
+	if !strings.Contains(view, "+ timesheet end") || !strings.Contains(view, "※ today and timesheet end") {
+		t.Fatalf("dashboard does not explain timesheet markers:\n%s", view)
 	}
 	legend := strings.Index(view, "* today")
 	help := strings.Index(view, "q quit")
@@ -489,9 +769,16 @@ func TestDashboardMarksTimesheetEnd(t *testing.T) {
 		t.Fatalf("dashboard marker legend should appear below the controls:\n%s", view)
 	}
 
-	model.weekStart = time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model.timesheets = []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-07-15"}}
 	view = model.View()
-	if !strings.Contains(view, "Fri 31+") {
-		t.Fatalf("dashboard does not mark month end as timesheet end:\n%s", view)
+	if !strings.Contains(view, "Wed 15※") {
+		t.Fatalf("dashboard does not combine today and timesheet end markers:\n%s", view)
+	}
+
+	model.weekStart = time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model.timesheets = []clicktime.Timesheet{{ID: "sheet-2", EndDate: "2026-07-30"}}
+	view = model.View()
+	if !strings.Contains(view, "Thu 30+") || strings.Contains(view, "Fri 31+") {
+		t.Fatalf("dashboard still assumes the end of the month is a timesheet end:\n%s", view)
 	}
 }
