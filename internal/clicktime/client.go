@@ -186,11 +186,32 @@ func (e TimeEntry) Key() string {
 }
 
 type Timesheet struct {
-	ID               string `json:"ID"`
-	StartDate        string `json:"StartDate"`
-	EndDate          string `json:"EndDate"`
-	Status           string `json:"Status"`
-	HasBeenSubmitted bool   `json:"HasBeenSubmitted"`
+	ID               string              `json:"ID"`
+	StartDate        string              `json:"StartDate"`
+	EndDate          string              `json:"EndDate"`
+	Status           string              `json:"Status"`
+	Comment          string              `json:"Comment"`
+	SubmittedDate    string              `json:"SubmittedDate"`
+	HasBeenSubmitted bool                `json:"HasBeenSubmitted"`
+	DayTotals        []TimesheetDayTotal `json:"DayTotals"`
+	Actions          []TimesheetAction   `json:"Actions"`
+}
+
+type TimesheetDayTotal struct {
+	Date  string `json:"Date"`
+	Hours Number `json:"Hours"`
+}
+
+type TimesheetAction struct {
+	Action string `json:"Action"`
+}
+
+func (t Timesheet) TotalHours() float64 {
+	var total float64
+	for _, day := range t.DayTotals {
+		total += float64(day.Hours)
+	}
+	return total
 }
 
 // TimeEntryInput is the standard ClickTime time-entry payload. ClickTime calls
@@ -214,6 +235,12 @@ type TimeOffUpdateInput struct {
 	Hours         float64 `json:"Hours"`
 	TimeOffTypeID string  `json:"TimeOffTypeID"`
 	Notes         string  `json:"Notes"`
+}
+
+type TimesheetSubmitInput struct {
+	Comment         string
+	CCNotifications []string
+	HasAttestation  bool
 }
 
 type APIError struct {
@@ -357,6 +384,48 @@ func (c *Client) Timesheets(ctx context.Context, start, end time.Time) ([]Timesh
 		"limit":    {"1000"},
 	}
 	return requestAll[Timesheet](ctx, c, "/Me/Timesheets", query)
+}
+
+func (c *Client) TimesheetForDate(ctx context.Context, date time.Time) (Timesheet, error) {
+	if date.IsZero() {
+		return Timesheet{}, errors.New("timesheet date is required")
+	}
+	var result Timesheet
+	path := "/Me/Timesheets/" + date.Format(time.DateOnly)
+	query := url.Values{"verbose": {"true"}}
+	err := c.request(ctx, http.MethodGet, path, query, nil, &result)
+	return result, err
+}
+
+func (c *Client) TimesheetActions(ctx context.Context, timesheetID string) ([]TimesheetAction, error) {
+	if strings.TrimSpace(timesheetID) == "" {
+		return nil, errors.New("timesheet ID is required")
+	}
+	var result []TimesheetAction
+	path := "/Me/Timesheets/" + url.PathEscape(timesheetID) + "/Actions"
+	err := c.request(ctx, http.MethodGet, path, nil, nil, &result)
+	return result, err
+}
+
+func (c *Client) SubmitTimesheet(ctx context.Context, timesheetID string, input TimesheetSubmitInput) (Timesheet, error) {
+	if strings.TrimSpace(timesheetID) == "" {
+		return Timesheet{}, errors.New("timesheet ID is required")
+	}
+	payload := struct {
+		Action          string   `json:"Action"`
+		Comment         string   `json:"Comment,omitempty"`
+		CCNotifications []string `json:"CCNotifications,omitempty"`
+		HasAttestation  bool     `json:"HasAttestation,omitempty"`
+	}{
+		Action:          "Submit",
+		Comment:         strings.TrimSpace(input.Comment),
+		CCNotifications: input.CCNotifications,
+		HasAttestation:  input.HasAttestation,
+	}
+	var result Timesheet
+	path := "/Me/Timesheets/" + url.PathEscape(timesheetID) + "/Actions"
+	err := c.request(ctx, http.MethodPost, path, nil, payload, &result)
+	return result, err
 }
 
 func (c *Client) CreateTimeEntry(ctx context.Context, input TimeEntryInput) (TimeEntry, error) {

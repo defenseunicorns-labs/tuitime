@@ -88,6 +88,96 @@ func TestTimesheets(t *testing.T) {
 	}
 }
 
+func TestTimesheetSubmissionAPI(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/Timesheets/2026-07-15":
+			if r.URL.Query().Get("verbose") != "true" {
+				t.Errorf("timesheet query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":{"ID":"sheet-1","StartDate":"2026-07-13","EndDate":"2026-07-19","Status":"Open","HasBeenSubmitted":false,"DayTotals":[{"Date":"2026-07-13","Hours":"7.5"},{"Date":"2026-07-14","Hours":8}],"Actions":[{"Action":"Submit"}]},"errors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/Timesheets/sheet-1/Actions":
+			if r.URL.RawQuery != "" {
+				t.Errorf("timesheet actions query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":[{"Action":"Submit"}],"errors":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/Me/Timesheets/sheet-1/Actions":
+			var input struct {
+				Action          string   `json:"Action"`
+				Comment         string   `json:"Comment"`
+				CCNotifications []string `json:"CCNotifications"`
+				HasAttestation  bool     `json:"HasAttestation"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatalf("decode submit body: %v", err)
+			}
+			if input.Action != "Submit" || input.Comment != "Ready for review" || !input.HasAttestation {
+				t.Errorf("submit body = %#v", input)
+			}
+			if len(input.CCNotifications) != 1 || input.CCNotifications[0] != "manager@example.com" {
+				t.Errorf("CCNotifications = %#v", input.CCNotifications)
+			}
+			_, _ = w.Write([]byte(`{"data":{"ID":"sheet-1","StartDate":"2026-07-13","EndDate":"2026-07-19","Status":"Waiting","HasBeenSubmitted":true,"SubmittedDate":"2026-07-19"},"errors":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	date := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	timesheet, err := client.TimesheetForDate(context.Background(), date)
+	if err != nil {
+		t.Fatalf("TimesheetForDate() error = %v", err)
+	}
+	if timesheet.ID != "sheet-1" || timesheet.Status != "Open" || timesheet.TotalHours() != 15.5 {
+		t.Fatalf("TimesheetForDate() = %#v, total = %v", timesheet, timesheet.TotalHours())
+	}
+	if len(timesheet.Actions) != 1 || timesheet.Actions[0].Action != "Submit" {
+		t.Fatalf("TimesheetForDate() actions = %#v", timesheet.Actions)
+	}
+
+	actions, err := client.TimesheetActions(context.Background(), timesheet.ID)
+	if err != nil {
+		t.Fatalf("TimesheetActions() error = %v", err)
+	}
+	if len(actions) != 1 || actions[0].Action != "Submit" {
+		t.Fatalf("TimesheetActions() = %#v", actions)
+	}
+
+	submitted, err := client.SubmitTimesheet(context.Background(), timesheet.ID, TimesheetSubmitInput{
+		Comment: " Ready for review ", CCNotifications: []string{"manager@example.com"}, HasAttestation: true,
+	})
+	if err != nil {
+		t.Fatalf("SubmitTimesheet() error = %v", err)
+	}
+	if submitted.ID != "sheet-1" || submitted.Status != "Waiting" || !submitted.HasBeenSubmitted {
+		t.Fatalf("SubmitTimesheet() = %#v", submitted)
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
+	}
+}
+
+func TestTimesheetSubmissionRequiresTarget(t *testing.T) {
+	t.Parallel()
+
+	client := New("secret")
+	if _, err := client.TimesheetForDate(context.Background(), time.Time{}); err == nil {
+		t.Fatal("TimesheetForDate() error = nil")
+	}
+	if _, err := client.TimesheetActions(context.Background(), ""); err == nil {
+		t.Fatal("TimesheetActions() error = nil")
+	}
+	if _, err := client.SubmitTimesheet(context.Background(), "", TimesheetSubmitInput{}); err == nil {
+		t.Fatal("SubmitTimesheet() error = nil")
+	}
+}
+
 func TestPaginationUsesNextLinkWithoutCount(t *testing.T) {
 	t.Parallel()
 
