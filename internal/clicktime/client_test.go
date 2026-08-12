@@ -80,8 +80,8 @@ func TestAPIError(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"data":null,"errors":[{"Message":"Invalid Credentials"}]}`))
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"data":null,"errors":[{"Field":"Hours","Message":"InvalidHours","MessageDetail":["Hours must not exceed 24","Received: 25"]}]}`))
 	}))
 	defer server.Close()
 
@@ -91,8 +91,57 @@ func TestAPIError(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("Me() error = %v, want *APIError", err)
 	}
-	if apiErr.StatusCode != http.StatusUnauthorized || apiErr.Error() != "ClickTime API returned 401: Invalid Credentials" {
-		t.Fatalf("APIError = %#v (%v)", apiErr, apiErr)
+	want := "ClickTime API returned 400: Hours: InvalidHours (Hours must not exceed 24; Received: 25)"
+	if apiErr.StatusCode != http.StatusBadRequest || apiErr.Error() != want {
+		t.Fatalf("APIError = %#v (%v), want %q", apiErr, apiErr, want)
+	}
+}
+
+func TestAPIErrorOnSuccessfulResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"ID":"me-1"},"errors":[{"Message":"PartialFailure","MessageDetail":["A submitted property was ignored"]}]}`))
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	_, err := client.Me(context.Background())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("Me() error = %v, want *APIError", err)
+	}
+	want := "ClickTime API reported an error: PartialFailure (A submitted property was ignored)"
+	if apiErr.StatusCode != http.StatusOK || apiErr.Error() != want {
+		t.Fatalf("APIError = %#v (%v), want %q", apiErr, apiErr, want)
+	}
+}
+
+func TestRequestPreservesResponseMetadata(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"ID":"me-1"},"errors":[],"meta":{"Warnings":["A read-only property was ignored"]}}`))
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	var me Me
+	meta, err := client.requestWithMeta(context.Background(), http.MethodGet, "/Me", nil, nil, &me)
+	if err != nil {
+		t.Fatalf("requestWithMeta() error = %v", err)
+	}
+	if me.ID != "me-1" {
+		t.Fatalf("requestWithMeta() result = %#v", me)
+	}
+	var metadata struct {
+		Warnings []string `json:"Warnings"`
+	}
+	if err := json.Unmarshal(meta, &metadata); err != nil {
+		t.Fatalf("decode metadata: %v", err)
+	}
+	if len(metadata.Warnings) != 1 || metadata.Warnings[0] != "A read-only property was ignored" {
+		t.Fatalf("metadata = %#v", metadata)
 	}
 }
 

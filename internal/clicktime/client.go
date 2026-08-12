@@ -217,28 +217,53 @@ func (e *APIError) Error() string {
 	message := strings.Join(e.Messages, "; ")
 	if message == "" {
 		message = http.StatusText(e.StatusCode)
+		if e.StatusCode >= 200 && e.StatusCode < 300 {
+			message = "unknown error"
+		}
 	}
-	if e.StatusCode == 0 {
+	switch {
+	case e.StatusCode == 0:
 		return message
+	case e.StatusCode >= 200 && e.StatusCode < 300:
+		return "ClickTime API reported an error: " + message
+	default:
+		return fmt.Sprintf("ClickTime API returned %d: %s", e.StatusCode, message)
 	}
-	return fmt.Sprintf("ClickTime API returned %d: %s", e.StatusCode, message)
 }
 
 type responseEnvelope struct {
 	Data   json.RawMessage `json:"data"`
 	Errors []apiMessage    `json:"errors"`
+	Meta   json.RawMessage `json:"meta"`
 }
 
 type apiMessage struct {
-	Message string `json:"Message"`
-	Detail  string `json:"Detail"`
-	Title   string `json:"Title"`
+	Field         string   `json:"Field"`
+	Message       string   `json:"Message"`
+	MessageDetail []string `json:"MessageDetail"`
+	Detail        string   `json:"Detail"`
+	Title         string   `json:"Title"`
 }
 
 func (e responseEnvelope) messages() []string {
 	messages := make([]string, 0, len(e.Errors))
 	for _, item := range e.Errors {
-		if message := firstNonEmpty(item.Message, item.Detail, item.Title); message != "" {
+		message := firstNonEmpty(item.Message, item.Detail, item.Title)
+		details := nonEmptyStrings(item.MessageDetail)
+		if message == "" && len(details) > 0 {
+			message, details = details[0], details[1:]
+		}
+		if field := strings.TrimSpace(item.Field); field != "" {
+			if message == "" {
+				message = field
+			} else {
+				message = field + ": " + message
+			}
+		}
+		if len(details) > 0 {
+			message += " (" + strings.Join(details, "; ") + ")"
+		}
+		if message != "" {
 			messages = append(messages, message)
 		}
 	}
@@ -345,6 +370,11 @@ func (c *Client) UpdateTimeOff(ctx context.Context, entryID string, input TimeOf
 }
 
 func (c *Client) request(ctx context.Context, method, path string, query url.Values, body, result any) error {
+	_, err := c.requestWithMeta(ctx, method, path, query, body, result)
+	return err
+}
+
+func (c *Client) requestWithMeta(ctx context.Context, method, path string, query url.Values, body, result any) (json.RawMessage, error) {
 	endpoint := c.baseURL + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
@@ -354,14 +384,14 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("encode ClickTime request: %w", err)
+			return nil, fmt.Errorf("encode ClickTime request: %w", err)
 		}
 		reader = bytes.NewReader(encoded)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
-		return fmt.Errorf("create ClickTime request: %w", err)
+		return nil, fmt.Errorf("create ClickTime request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
@@ -369,38 +399,38 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("contact ClickTime: %w", err)
+		return nil, fmt.Errorf("contact ClickTime: %w", err)
 	}
 	defer resp.Body.Close()
 
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return fmt.Errorf("read ClickTime response: %w", err)
+		return nil, fmt.Errorf("read ClickTime response: %w", err)
 	}
 	if resp.StatusCode == http.StatusNoContent || len(bytes.TrimSpace(payload)) == 0 {
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil
+			return nil, nil
 		}
-		return &APIError{StatusCode: resp.StatusCode}
+		return nil, &APIError{StatusCode: resp.StatusCode}
 	}
 
 	var envelope responseEnvelope
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return &APIError{StatusCode: resp.StatusCode, Messages: []string{strings.TrimSpace(string(payload))}}
+			return nil, &APIError{StatusCode: resp.StatusCode, Messages: []string{strings.TrimSpace(string(payload))}}
 		}
-		return fmt.Errorf("decode ClickTime response: %w", err)
+		return nil, fmt.Errorf("decode ClickTime response: %w", err)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{StatusCode: resp.StatusCode, Messages: envelope.messages()}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || len(envelope.Errors) > 0 {
+		return envelope.Meta, &APIError{StatusCode: resp.StatusCode, Messages: envelope.messages()}
 	}
 	if result == nil || len(envelope.Data) == 0 || string(envelope.Data) == "null" {
-		return nil
+		return envelope.Meta, nil
 	}
 	if err := json.Unmarshal(envelope.Data, result); err != nil {
-		return fmt.Errorf("decode ClickTime data: %w", err)
+		return envelope.Meta, fmt.Errorf("decode ClickTime data: %w", err)
 	}
-	return nil
+	return envelope.Meta, nil
 }
 
 func firstNonEmpty(values ...string) string {
@@ -410,4 +440,14 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func nonEmptyStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
