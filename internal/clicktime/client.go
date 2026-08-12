@@ -161,7 +161,7 @@ type TimeOffEntry struct {
 	TimeOffEntryID string `json:"TimeOffEntryID"`
 	Date           string `json:"Date"`
 	Hours          Number `json:"Hours"`
-	Comment        string `json:"Comment"`
+	Notes          string `json:"Notes"`
 	TimeOffTypeID  string `json:"TimeOffTypeID"`
 }
 
@@ -199,7 +199,13 @@ type TimeOffInput struct {
 	Date          string  `json:"Date"`
 	Hours         float64 `json:"Hours"`
 	TimeOffTypeID string  `json:"TimeOffTypeID"`
-	Comment       string  `json:"Comment"`
+	Notes         string  `json:"Notes"`
+}
+
+type TimeOffUpdateInput struct {
+	Hours         float64 `json:"Hours"`
+	TimeOffTypeID string  `json:"TimeOffTypeID"`
+	Notes         string  `json:"Notes"`
 }
 
 type APIError struct {
@@ -298,9 +304,9 @@ func (c *Client) TimeEntries(ctx context.Context, start, end time.Time) ([]TimeE
 func (c *Client) TimeOff(ctx context.Context, start, end time.Time) ([]TimeOffEntry, error) {
 	var result []TimeOffEntry
 	query := url.Values{
-		"StartDate": {start.Format(time.DateOnly)},
-		"EndDate":   {end.Format(time.DateOnly)},
-		"limit":     {"100"},
+		"FromDate": {start.Format(time.DateOnly)},
+		"ToDate":   {end.Format(time.DateOnly)},
+		"limit":    {"100"},
 	}
 	err := c.request(ctx, http.MethodGet, "/Me/TimeOff", query, nil, &result)
 	return result, err
@@ -328,7 +334,7 @@ func (c *Client) CreateTimeOff(ctx context.Context, input TimeOffInput) (TimeOff
 	return result, err
 }
 
-func (c *Client) UpdateTimeOff(ctx context.Context, entryID string, input TimeOffInput) (TimeOffEntry, error) {
+func (c *Client) UpdateTimeOff(ctx context.Context, entryID string, input TimeOffUpdateInput) (TimeOffEntry, error) {
 	if strings.TrimSpace(entryID) == "" {
 		return TimeOffEntry{}, errors.New("time off entry ID is required")
 	}

@@ -208,7 +208,7 @@ func TestTimeOffRowsAndTotals(t *testing.T) {
 		weekStart:    week,
 		timeOffTypes: []clicktime.TimeOffType{{ID: "vacation", Name: "Vacation"}},
 		timeOffEntries: []clicktime.TimeOffEntry{{
-			ID: "off-1", Date: "2026-07-29", Hours: 8, TimeOffTypeID: "vacation", Comment: "Summer break",
+			ID: "off-1", Date: "2026-07-29", Hours: 8, TimeOffTypeID: "vacation", Notes: "Summer break",
 		}},
 	}
 	rows := model.timesheetRows()
@@ -219,6 +219,9 @@ func TestTimeOffRowsAndTotals(t *testing.T) {
 	entries := model.selectedEntries()
 	if len(entries) != 1 || entries[0].kind != timeOffEntry || entries[0].timeOff.Key() != "off-1" {
 		t.Fatalf("selectedEntries() = %#v", entries)
+	}
+	if entries[0].comment() != "Summer break" {
+		t.Fatalf("time off notes = %q, want %q", entries[0].comment(), "Summer break")
 	}
 	if model.weekTotal() != 8 || model.totalForDate(week.AddDate(0, 0, 2)) != 8 {
 		t.Fatalf("time off totals: week=%v day=%v", model.weekTotal(), model.totalForDate(week.AddDate(0, 0, 2)))

@@ -106,7 +106,7 @@ func (e trackedEntry) hours() float64 {
 
 func (e trackedEntry) comment() string {
 	if e.kind == timeOffEntry {
-		return e.timeOff.Comment
+		return e.timeOff.Notes
 	}
 	return e.project.Comment
 }
@@ -495,7 +495,7 @@ func (m *Model) beginEditEntry(entry trackedEntry) {
 		timeOffType := m.timeOffTypeByID(entry.timeOff.TimeOffTypeID)
 		m.draft = draft{
 			kind: timeOffEntry, date: dateString(entry.timeOff.Date),
-			hours: float64(entry.timeOff.Hours), comment: entry.timeOff.Comment,
+			hours: float64(entry.timeOff.Hours), comment: entry.timeOff.Notes,
 			timeOffTypeID:   entry.timeOff.TimeOffTypeID,
 			timeOffTypeName: timeOffType.Label(), entryID: entry.timeOff.Key(),
 		}
@@ -1341,14 +1341,15 @@ func saveEntryCmd(api *clicktime.Client, value draft) tea.Cmd {
 		defer cancel()
 		var err error
 		if value.kind == timeOffEntry {
-			input := clicktime.TimeOffInput{
-				Date: value.date, Hours: value.hours,
-				TimeOffTypeID: value.timeOffTypeID, Comment: value.comment,
-			}
 			if value.entryID == "" {
-				_, err = api.CreateTimeOff(ctx, input)
+				_, err = api.CreateTimeOff(ctx, clicktime.TimeOffInput{
+					Date: value.date, Hours: value.hours,
+					TimeOffTypeID: value.timeOffTypeID, Notes: value.comment,
+				})
 			} else {
-				_, err = api.UpdateTimeOff(ctx, value.entryID, input)
+				_, err = api.UpdateTimeOff(ctx, value.entryID, clicktime.TimeOffUpdateInput{
+					Hours: value.hours, TimeOffTypeID: value.timeOffTypeID, Notes: value.comment,
+				})
 			}
 		} else {
 			input := clicktime.TimeEntryInput{

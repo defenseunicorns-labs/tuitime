@@ -106,20 +106,33 @@ func TestTimeOff(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/Me/TimeOffTypes":
 			_, _ = w.Write([]byte(`{"data":[{"ID":"vacation","Name":"Vacation"}],"errors":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/Me/TimeOff":
-			if r.URL.Query().Get("StartDate") != "2026-07-27" || r.URL.Query().Get("EndDate") != "2026-08-02" {
+			query := r.URL.Query()
+			if query.Get("FromDate") != "2026-07-27" || query.Get("ToDate") != "2026-08-02" {
 				t.Errorf("time off query = %s", r.URL.RawQuery)
 			}
-			_, _ = w.Write([]byte(`{"data":[{"ID":"off-1","Date":"2026-07-29","Hours":8,"TimeOffTypeID":"vacation"}],"errors":[]}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/Me/TimeOff":
-			var input TimeOffInput
-			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-				t.Fatalf("decode time off body: %v", err)
+			if query.Has("StartDate") || query.Has("EndDate") {
+				t.Errorf("time off query uses unsupported date filters: %s", r.URL.RawQuery)
 			}
-			if input.TimeOffTypeID != "vacation" || input.Date != "2026-07-29" || input.Hours != 8 {
-				t.Errorf("time off body = %#v", input)
+			_, _ = w.Write([]byte(`{"data":[{"ID":"off-1","Date":"2026-07-29","Hours":8,"Notes":"Summer break","TimeOffTypeID":"vacation"}],"errors":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/Me/TimeOff":
+			input := decodeJSONBody(t, r)
+			if input["TimeOffTypeID"] != "vacation" || input["Date"] != "2026-07-29" || input["Hours"] != float64(8) || input["Notes"] != "Summer break" {
+				t.Errorf("create time off body = %#v", input)
+			}
+			if _, exists := input["Comment"]; exists {
+				t.Errorf("create time off body contains unsupported Comment field: %#v", input)
 			}
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"data":{"ID":"off-1"},"errors":[]}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/Me/TimeOff/off-1":
+			input := decodeJSONBody(t, r)
+			if input["TimeOffTypeID"] != "vacation" || input["Hours"] != float64(4) || input["Notes"] != "Half day" {
+				t.Errorf("update time off body = %#v", input)
+			}
+			if _, exists := input["Date"]; exists {
+				t.Errorf("update time off body contains read-only Date field: %#v", input)
+			}
+			_, _ = w.Write([]byte(`{"data":{"ID":"off-1","Date":"2026-07-29","Hours":4,"Notes":"Half day","TimeOffTypeID":"vacation"},"errors":[]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -133,18 +146,33 @@ func TestTimeOff(t *testing.T) {
 	}
 	start := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
 	entries, err := client.TimeOff(context.Background(), start, start.AddDate(0, 0, 6))
-	if err != nil || len(entries) != 1 || entries[0].Key() != "off-1" {
+	if err != nil || len(entries) != 1 || entries[0].Key() != "off-1" || entries[0].Notes != "Summer break" {
 		t.Fatalf("TimeOff() = %#v, %v", entries, err)
 	}
 	entry, err := client.CreateTimeOff(context.Background(), TimeOffInput{
-		Date: "2026-07-29", Hours: 8, TimeOffTypeID: "vacation",
+		Date: "2026-07-29", Hours: 8, TimeOffTypeID: "vacation", Notes: "Summer break",
 	})
 	if err != nil || entry.Key() != "off-1" {
 		t.Fatalf("CreateTimeOff() = %#v, %v", entry, err)
 	}
-	if requests != 3 {
-		t.Fatalf("requests = %d, want 3", requests)
+	entry, err = client.UpdateTimeOff(context.Background(), "off-1", TimeOffUpdateInput{
+		Hours: 4, TimeOffTypeID: "vacation", Notes: "Half day",
+	})
+	if err != nil || entry.Key() != "off-1" || entry.Notes != "Half day" {
+		t.Fatalf("UpdateTimeOff() = %#v, %v", entry, err)
 	}
+	if requests != 4 {
+		t.Fatalf("requests = %d, want 4", requests)
+	}
+}
+
+func decodeJSONBody(t *testing.T, r *http.Request) map[string]any {
+	t.Helper()
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	return body
 }
 
 func TestTasksForJobAcceptsTaskIDs(t *testing.T) {
