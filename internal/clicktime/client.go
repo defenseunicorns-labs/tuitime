@@ -235,6 +235,23 @@ type responseEnvelope struct {
 	Data   json.RawMessage `json:"data"`
 	Errors []apiMessage    `json:"errors"`
 	Meta   json.RawMessage `json:"meta"`
+	Page   responsePage    `json:"page"`
+}
+
+type responseInfo struct {
+	Meta json.RawMessage
+	Page responsePage
+}
+
+type responsePage struct {
+	Count  *int              `json:"count"`
+	Limit  *int              `json:"limit"`
+	Offset *int              `json:"offset"`
+	Links  responsePageLinks `json:"links"`
+}
+
+type responsePageLinks struct {
+	Next string `json:"next"`
 }
 
 type apiMessage struct {
@@ -277,31 +294,23 @@ func (c *Client) Me(ctx context.Context) (Me, error) {
 }
 
 func (c *Client) Clients(ctx context.Context) ([]ClientResource, error) {
-	var result []ClientResource
 	query := url.Values{"IsActive": {"true"}, "limit": {"1000"}}
-	err := c.request(ctx, http.MethodGet, "/Me/Clients", query, nil, &result)
-	return result, err
+	return requestAll[ClientResource](ctx, c, "/Me/Clients", query)
 }
 
 func (c *Client) Jobs(ctx context.Context) ([]Job, error) {
-	var result []Job
 	query := url.Values{"IsActive": {"true"}, "limit": {"1000"}}
-	err := c.request(ctx, http.MethodGet, "/Me/Jobs", query, nil, &result)
-	return result, err
+	return requestAll[Job](ctx, c, "/Me/Jobs", query)
 }
 
 func (c *Client) Tasks(ctx context.Context) ([]Task, error) {
-	var result []Task
 	query := url.Values{"IsActive": {"true"}, "limit": {"1000"}}
-	err := c.request(ctx, http.MethodGet, "/Me/Tasks", query, nil, &result)
-	return result, err
+	return requestAll[Task](ctx, c, "/Me/Tasks", query)
 }
 
 func (c *Client) TimeOffTypes(ctx context.Context) ([]TimeOffType, error) {
-	var result []TimeOffType
 	query := url.Values{"IsActive": {"true"}, "limit": {"1000"}}
-	err := c.request(ctx, http.MethodGet, "/Me/TimeOffTypes", query, nil, &result)
-	return result, err
+	return requestAll[TimeOffType](ctx, c, "/Me/TimeOffTypes", query)
 }
 
 func (c *Client) TasksForJob(ctx context.Context, jobID string) ([]Task, error) {
@@ -309,32 +318,28 @@ func (c *Client) TasksForJob(ctx context.Context, jobID string) ([]Task, error) 
 		return nil, errors.New("job ID is required")
 	}
 	var result []Task
-	query := url.Values{"IsActive": {"true"}, "limit": {"1000"}}
+	query := url.Values{"IsActive": {"true"}}
 	path := "/Me/Jobs/" + url.PathEscape(jobID) + "/Tasks"
 	err := c.request(ctx, http.MethodGet, path, query, nil, &result)
 	return result, err
 }
 
 func (c *Client) TimeEntries(ctx context.Context, start, end time.Time) ([]TimeEntry, error) {
-	var result []TimeEntry
 	query := url.Values{
 		"StartDate": {start.Format(time.DateOnly)},
 		"EndDate":   {end.Format(time.DateOnly)},
 		"limit":     {"100"},
 	}
-	err := c.request(ctx, http.MethodGet, "/Me/TimeEntries", query, nil, &result)
-	return result, err
+	return requestAll[TimeEntry](ctx, c, "/Me/TimeEntries", query)
 }
 
 func (c *Client) TimeOff(ctx context.Context, start, end time.Time) ([]TimeOffEntry, error) {
-	var result []TimeOffEntry
 	query := url.Values{
 		"FromDate": {start.Format(time.DateOnly)},
 		"ToDate":   {end.Format(time.DateOnly)},
-		"limit":    {"100"},
+		"limit":    {"1000"},
 	}
-	err := c.request(ctx, http.MethodGet, "/Me/TimeOff", query, nil, &result)
-	return result, err
+	return requestAll[TimeOffEntry](ctx, c, "/Me/TimeOff", query)
 }
 
 func (c *Client) CreateTimeEntry(ctx context.Context, input TimeEntryInput) (TimeEntry, error) {
@@ -369,12 +374,68 @@ func (c *Client) UpdateTimeOff(ctx context.Context, entryID string, input TimeOf
 	return result, err
 }
 
+func requestAll[T any](ctx context.Context, client *Client, path string, query url.Values) ([]T, error) {
+	pageQuery := make(url.Values, len(query)+1)
+	for key, values := range query {
+		pageQuery[key] = append([]string(nil), values...)
+	}
+
+	offset, err := strconv.Atoi(pageQuery.Get("offset"))
+	if err != nil || offset < 0 {
+		offset = 0
+	}
+	pageQuery.Set("offset", strconv.Itoa(offset))
+
+	var result []T
+	for {
+		var items []T
+		info, err := client.requestWithInfo(ctx, http.MethodGet, path, pageQuery, nil, &items)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, items...)
+		if len(items) == 0 {
+			return result, nil
+		}
+
+		currentOffset := offset
+		if info.Page.Offset != nil {
+			currentOffset = *info.Page.Offset
+		}
+		step := len(items)
+		if info.Page.Limit != nil && *info.Page.Limit > 0 {
+			step = *info.Page.Limit
+		}
+		nextOffset := currentOffset + step
+		if !info.Page.hasNext(nextOffset) {
+			return result, nil
+		}
+		if nextOffset <= offset {
+			return nil, errors.New("ClickTime returned invalid pagination metadata")
+		}
+		offset = nextOffset
+		pageQuery.Set("offset", strconv.Itoa(offset))
+	}
+}
+
+func (p responsePage) hasNext(nextOffset int) bool {
+	if p.Count != nil {
+		return nextOffset < *p.Count
+	}
+	return strings.TrimSpace(p.Links.Next) != ""
+}
+
 func (c *Client) request(ctx context.Context, method, path string, query url.Values, body, result any) error {
 	_, err := c.requestWithMeta(ctx, method, path, query, body, result)
 	return err
 }
 
 func (c *Client) requestWithMeta(ctx context.Context, method, path string, query url.Values, body, result any) (json.RawMessage, error) {
+	info, err := c.requestWithInfo(ctx, method, path, query, body, result)
+	return info.Meta, err
+}
+
+func (c *Client) requestWithInfo(ctx context.Context, method, path string, query url.Values, body, result any) (responseInfo, error) {
 	endpoint := c.baseURL + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
@@ -384,14 +445,14 @@ func (c *Client) requestWithMeta(ctx context.Context, method, path string, query
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("encode ClickTime request: %w", err)
+			return responseInfo{}, fmt.Errorf("encode ClickTime request: %w", err)
 		}
 		reader = bytes.NewReader(encoded)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
-		return nil, fmt.Errorf("create ClickTime request: %w", err)
+		return responseInfo{}, fmt.Errorf("create ClickTime request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
@@ -399,38 +460,39 @@ func (c *Client) requestWithMeta(ctx context.Context, method, path string, query
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("contact ClickTime: %w", err)
+		return responseInfo{}, fmt.Errorf("contact ClickTime: %w", err)
 	}
 	defer resp.Body.Close()
 
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read ClickTime response: %w", err)
+		return responseInfo{}, fmt.Errorf("read ClickTime response: %w", err)
 	}
 	if resp.StatusCode == http.StatusNoContent || len(bytes.TrimSpace(payload)) == 0 {
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil, nil
+			return responseInfo{}, nil
 		}
-		return nil, &APIError{StatusCode: resp.StatusCode}
+		return responseInfo{}, &APIError{StatusCode: resp.StatusCode}
 	}
 
 	var envelope responseEnvelope
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, &APIError{StatusCode: resp.StatusCode, Messages: []string{strings.TrimSpace(string(payload))}}
+			return responseInfo{}, &APIError{StatusCode: resp.StatusCode, Messages: []string{strings.TrimSpace(string(payload))}}
 		}
-		return nil, fmt.Errorf("decode ClickTime response: %w", err)
+		return responseInfo{}, fmt.Errorf("decode ClickTime response: %w", err)
 	}
+	info := responseInfo{Meta: envelope.Meta, Page: envelope.Page}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || len(envelope.Errors) > 0 {
-		return envelope.Meta, &APIError{StatusCode: resp.StatusCode, Messages: envelope.messages()}
+		return info, &APIError{StatusCode: resp.StatusCode, Messages: envelope.messages()}
 	}
 	if result == nil || len(envelope.Data) == 0 || string(envelope.Data) == "null" {
-		return envelope.Meta, nil
+		return info, nil
 	}
 	if err := json.Unmarshal(envelope.Data, result); err != nil {
-		return envelope.Meta, fmt.Errorf("decode ClickTime data: %w", err)
+		return info, fmt.Errorf("decode ClickTime data: %w", err)
 	}
-	return envelope.Meta, nil
+	return info, nil
 }
 
 func firstNonEmpty(values ...string) string {

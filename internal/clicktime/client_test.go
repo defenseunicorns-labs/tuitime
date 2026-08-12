@@ -13,21 +13,32 @@ import (
 func TestTimeEntries(t *testing.T) {
 	t.Parallel()
 
+	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
 		if got := r.Header.Get("Authorization"); got != "Token secret" {
 			t.Errorf("Authorization = %q", got)
 		}
 		if got := r.URL.Path; got != "/v2/Me/TimeEntries" {
 			t.Errorf("path = %q", got)
 		}
-		if got := r.URL.Query().Get("StartDate"); got != "2026-07-27" {
+		query := r.URL.Query()
+		if got := query.Get("StartDate"); got != "2026-07-27" {
 			t.Errorf("StartDate = %q", got)
 		}
-		if got := r.URL.Query().Get("EndDate"); got != "2026-08-02" {
+		if got := query.Get("EndDate"); got != "2026-08-02" {
 			t.Errorf("EndDate = %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"ID":"entry-1","Date":"2026-07-27","Hours":"7.5","JobID":"job-1","TaskID":"task-1"}],"errors":[]}`))
+		switch query.Get("offset") {
+		case "0":
+			_, _ = w.Write([]byte(`{"data":[{"ID":"entry-1","Date":"2026-07-27","Hours":"7.5","JobID":"job-1","TaskID":"task-1"}],"errors":[],"page":{"count":2,"limit":1,"offset":0}}`))
+		case "1":
+			_, _ = w.Write([]byte(`{"data":[{"ID":"entry-2","Date":"2026-07-28","Hours":8,"JobID":"job-1","TaskID":"task-1"}],"errors":[],"page":{"count":2,"limit":1,"offset":1}}`))
+		default:
+			t.Errorf("unexpected offset = %q", query.Get("offset"))
+			http.Error(w, "unexpected offset", http.StatusBadRequest)
+		}
 	}))
 	defer server.Close()
 
@@ -37,8 +48,66 @@ func TestTimeEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TimeEntries() error = %v", err)
 	}
-	if len(entries) != 1 || entries[0].Key() != "entry-1" || float64(entries[0].Hours) != 7.5 {
+	if len(entries) != 2 || entries[0].Key() != "entry-1" || float64(entries[0].Hours) != 7.5 || entries[1].Key() != "entry-2" {
 		t.Fatalf("TimeEntries() = %#v", entries)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
+func TestPaginationUsesNextLinkWithoutCount(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Get("IsActive") != "true" || query.Get("limit") != "1000" {
+			t.Errorf("clients query = %s", r.URL.RawQuery)
+		}
+		switch query.Get("offset") {
+		case "0":
+			_, _ = w.Write([]byte(`{"data":[{"ID":"client-1","Name":"First"}],"errors":[],"page":{"limit":1,"offset":0,"links":{"next":"https://api.clicktime.com/v2/Me/Clients?offset=1"}}}`))
+		case "1":
+			_, _ = w.Write([]byte(`{"data":[{"ID":"client-2","Name":"Second"}],"errors":[],"page":{"limit":1,"offset":1,"links":{"next":null}}}`))
+		default:
+			http.Error(w, "unexpected offset", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	clients, err := client.Clients(context.Background())
+	if err != nil {
+		t.Fatalf("Clients() error = %v", err)
+	}
+	if len(clients) != 2 || clients[0].ID != "client-1" || clients[1].ID != "client-2" {
+		t.Fatalf("Clients() = %#v", clients)
+	}
+}
+
+func TestPaginationDiscardsPartialResultsOnFailure(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("offset") {
+		case "0":
+			_, _ = w.Write([]byte(`{"data":[{"ID":"client-1","Name":"First"}],"errors":[],"page":{"count":2,"limit":1,"offset":0}}`))
+		case "1":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"data":null,"errors":[{"Message":"PaginationFailed"}]}`))
+		default:
+			http.Error(w, "unexpected offset", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	clients, err := client.Clients(context.Background())
+	if err == nil {
+		t.Fatal("Clients() error = nil")
+	}
+	if clients != nil {
+		t.Fatalf("Clients() = %#v, want nil after a page failure", clients)
 	}
 }
 
@@ -158,6 +227,9 @@ func TestTimeOff(t *testing.T) {
 			query := r.URL.Query()
 			if query.Get("FromDate") != "2026-07-27" || query.Get("ToDate") != "2026-08-02" {
 				t.Errorf("time off query = %s", r.URL.RawQuery)
+			}
+			if query.Get("limit") != "1000" || query.Get("offset") != "0" {
+				t.Errorf("time off pagination = %s", r.URL.RawQuery)
 			}
 			if query.Has("StartDate") || query.Has("EndDate") {
 				t.Errorf("time off query uses unsupported date filters: %s", r.URL.RawQuery)
