@@ -33,6 +33,11 @@ var (
 	warningStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#A16207", Dark: "#FACC15"})
 
+	emptyDayStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#FFFFFF"}).
+			Background(lipgloss.AdaptiveColor{Light: "#A16207", Dark: "#A16207"})
+
 	pendingStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#7DD3FC"})
 
