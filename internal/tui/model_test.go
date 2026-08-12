@@ -337,6 +337,16 @@ func TestTimesheetSubmissionFlow(t *testing.T) {
 				t.Errorf("timesheet query = %s", r.URL.RawQuery)
 			}
 			_, _ = w.Write([]byte(`{"data":{"ID":"sheet-1","StartDate":"2026-07-01","EndDate":"2026-07-15","Status":"Open","DayTotals":[{"Date":"2026-07-01","Hours":8},{"Date":"2026-07-02","Hours":8},{"Date":"2026-07-03","Hours":8},{"Date":"2026-07-06","Hours":8},{"Date":"2026-07-07","Hours":8}]},"errors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/TimeEntries":
+			if r.URL.Query().Get("StartDate") != "2026-07-01" || r.URL.Query().Get("EndDate") != "2026-07-15" {
+				t.Errorf("time entries query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":[{"ID":"entry-1","Date":"2026-07-01","Hours":8,"JobID":"job-1","TaskID":"task-1"},{"ID":"entry-2","Date":"2026-07-02","Hours":8,"JobID":"job-1","TaskID":"task-1"},{"ID":"entry-3","Date":"2026-07-06","Hours":4,"JobID":"job-1","TaskID":"task-1"},{"ID":"entry-4","Date":"2026-07-06","Hours":4,"JobID":"job-2","TaskID":"task-2"}],"errors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/TimeOff":
+			if r.URL.Query().Get("FromDate") != "2026-07-01" || r.URL.Query().Get("ToDate") != "2026-07-15" {
+				t.Errorf("time off query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":[],"errors":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/Me/Timesheets/sheet-1/Actions":
 			_, _ = w.Write([]byte(`{"data":[{"Action":"Submit"}],"errors":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/Company":
@@ -379,10 +389,22 @@ func TestTimesheetSubmissionFlow(t *testing.T) {
 		t.Fatalf("timesheet review screen = %v, timesheet = %#v", review.screen, review.timesheetToSubmit)
 	}
 	view := review.View()
-	for _, text := range []string{"Submit this timesheet?", "Jul 1–15, 2026", "40.00", "entire period", "I certify that these hours are complete and accurate."} {
+	for _, text := range []string{"Submit this timesheet?", "Jul 1–15, 2026", "40.00", "Calendar", "Jun 29 - Jul 5", "Jul 6 - Jul 12", "Code1", "Code2", "Wed Jul 01", "Wed Jul 15", "Code1 - 20.00h", "Code2 - 4.00h", "These are weekdays without any time entry. FTO need not be included in ClickTime.", "entire period", "I certify that these hours are complete and accurate."} {
 		if !strings.Contains(view, text) {
 			t.Fatalf("timesheet review does not contain %q:\n%s", text, view)
 		}
+	}
+	if strings.Contains(view, "EMPTY") || strings.Contains(view, "┌") {
+		t.Fatalf("timesheet review should use compact borderless week blocks without EMPTY labels:\n%s", view)
+	}
+	if !strings.Contains(view, "│") {
+		t.Fatalf("timesheet review should separate week blocks with a vertical border:\n%s", view)
+	}
+	if !strings.Contains(view, "Wed Jul 08          "+formatTableHours(0)) {
+		t.Fatalf("empty weekday should highlight only the date and show Code1 as an empty value marker:\n%s", view)
+	}
+	if !strings.Contains(view, emptyDayStyle.Render("Empty")+" - These are weekdays without any time entry.") {
+		t.Fatalf("empty weekday legend should highlight the Empty label:\n%s", view)
 	}
 
 	updated, cmd = review.updateTimesheetReview(tea.KeyMsg{Type: tea.KeyEnter})
@@ -395,8 +417,8 @@ func TestTimesheetSubmissionFlow(t *testing.T) {
 	if dashboardLoading.screen != screenLoading || dashboardLoading.status != "Timesheet submitted for approval." || refreshCmd == nil {
 		t.Fatalf("submitted screen = %v, status = %q, cmd = %v", dashboardLoading.screen, dashboardLoading.status, refreshCmd)
 	}
-	if requests != 4 {
-		t.Fatalf("requests = %d, want 4", requests)
+	if requests != 6 {
+		t.Fatalf("requests = %d, want 6", requests)
 	}
 }
 

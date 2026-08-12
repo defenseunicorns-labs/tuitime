@@ -125,6 +125,13 @@ type timesheetRow struct {
 	total   float64
 }
 
+type submissionChargeCode struct {
+	key   string
+	alias string
+	name  string
+	total float64
+}
+
 type allDataMsg struct {
 	me             clicktime.Me
 	clients        []clicktime.ClientResource
@@ -152,6 +159,8 @@ type timesheetReadyMsg struct {
 	timesheet            clicktime.Timesheet
 	actions              []clicktime.TimesheetAction
 	attestationStatement string
+	entries              []clicktime.TimeEntry
+	timeOffEntries       []clicktime.TimeOffEntry
 }
 
 type timesheetSubmittedMsg struct {
@@ -191,6 +200,8 @@ type Model struct {
 	status               string
 	lastError            error
 	timesheetToSubmit    clicktime.Timesheet
+	submissionEntries    []clicktime.TimeEntry
+	submissionTimeOff    []clicktime.TimeOffEntry
 	attestationStatement string
 
 	picker         list.Model
@@ -307,6 +318,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case timesheetReadyMsg:
 		m.timesheetToSubmit = msg.timesheet
+		m.submissionEntries = sortedEntries(msg.entries)
+		m.submissionTimeOff = sortedTimeOffEntries(msg.timeOffEntries)
 		m.attestationStatement = strings.TrimSpace(msg.attestationStatement)
 		if !hasTimesheetAction(msg.actions, "Submit") {
 			status := strings.TrimSpace(msg.timesheet.Status)
@@ -446,6 +459,8 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status = ""
 		m.lastError = nil
 		m.timesheetToSubmit = clicktime.Timesheet{}
+		m.submissionEntries = nil
+		m.submissionTimeOff = nil
 		m.attestationStatement = ""
 		return m, m.withSpinner(loadTimesheetForSubmissionCmd(m.api, date))
 	case "n":
@@ -1095,6 +1110,10 @@ func (m Model) timesheetReviewView() string {
 	body.WriteString(summaryLine("Period", displayDateRange(timesheet.StartDate, timesheet.EndDate)) + "\n")
 	body.WriteString(summaryLine("Status", status) + "\n")
 	body.WriteString(summaryLine("Hours", strconv.FormatFloat(timesheet.TotalHours(), 'f', 2, 64)))
+	if calendar := m.timesheetCalendarView(timesheet); calendar != "" {
+		body.WriteString("\n\n" + subtitleStyle.Render("Calendar"))
+		body.WriteString("\n" + detailStyle.Render(calendar))
+	}
 	body.WriteString("\n\n" + subtitleStyle.Render("Submitting sends the entire period to ClickTime for approval."))
 	body.WriteString("\n" + mutedStyle.Render("You may not be able to edit its entries after submission."))
 	if statement := strings.TrimSpace(m.attestationStatement); statement != "" {
@@ -1315,6 +1334,219 @@ func compactTimesheetPeriod(timesheet clicktime.Timesheet) string {
 	default:
 		return start.Format("Jan 2, 2006") + "–" + end.Format("Jan 2, 2006")
 	}
+}
+
+func (m Model) timesheetCalendarView(timesheet clicktime.Timesheet) string {
+	start, startErr := time.Parse(time.DateOnly, dateString(timesheet.StartDate))
+	end, endErr := time.Parse(time.DateOnly, dateString(timesheet.EndDate))
+	if startErr != nil || endErr != nil || end.Before(start) {
+		return ""
+	}
+
+	codes, hoursByDateCode, totalsByDate := m.submissionChargeCodeHours()
+	if len(codes) == 0 {
+		codes = []submissionChargeCode{{key: "total", alias: "Code1", name: "Total hours", total: timesheet.TotalHours()}}
+		hoursByDateCode = map[string]map[string]float64{}
+		totalsByDate = map[string]float64{}
+		for _, total := range timesheet.DayTotals {
+			if date := dateString(total.Date); date != "" {
+				hours := float64(total.Hours)
+				hoursByDateCode[date] = map[string]float64{"total": hours}
+				totalsByDate[date] = hours
+			}
+		}
+	}
+
+	weekViews := make([]string, 0)
+	hasEmptyWeekday := false
+	for weekStart := startOfWeek(start); !weekStart.After(end); weekStart = weekStart.AddDate(0, 0, 7) {
+		weekEnd := weekStart.AddDate(0, 0, 6)
+		headers := []string{"Date"}
+		for _, code := range codes {
+			headers = append(headers, code.alias)
+		}
+
+		rows := make([][]string, 0, 7)
+		emptyRows := make([]bool, 0, 7)
+		for index := 0; index < 7; index++ {
+			date := weekStart.AddDate(0, 0, index)
+			inPeriod := !date.Before(start) && !date.After(end)
+			dateKey := date.Format(time.DateOnly)
+			row := []string{date.Format("Mon Jan 02")}
+			emptyWeekday := inPeriod && isWeekday(date) && totalsByDate[dateKey] == 0
+			hasEmptyWeekday = hasEmptyWeekday || emptyWeekday
+			for _, code := range codes {
+				value := ""
+				if inPeriod {
+					value = formatTableHours(hoursByDateCode[dateKey][code.key])
+				}
+				row = append(row, value)
+			}
+			rows = append(rows, row)
+			emptyRows = append(emptyRows, emptyWeekday)
+		}
+
+		weekViews = append(weekViews, submissionWeekBlock(fmt.Sprintf("%s - %s", weekStart.Format("Jan 2"), weekEnd.Format("Jan 2")), headers, rows, emptyRows))
+	}
+
+	var body strings.Builder
+	body.WriteString(joinSubmissionWeekBlocks(weekViews))
+	body.WriteString("\n\n")
+	for _, code := range codes {
+		body.WriteString(fmt.Sprintf("%s - %sh - %s\n", code.alias, strconv.FormatFloat(code.total, 'f', 2, 64), code.name))
+	}
+	if hasEmptyWeekday {
+		body.WriteString(emptyDayStyle.Render("Empty"))
+		body.WriteString(" - These are weekdays without any time entry. FTO need not be included in ClickTime.\n")
+	}
+	return strings.TrimRight(body.String(), "\n")
+}
+
+func (m Model) submissionChargeCodeHours() ([]submissionChargeCode, map[string]map[string]float64, map[string]float64) {
+	codeByKey := make(map[string]*submissionChargeCode)
+	hoursByDateCode := make(map[string]map[string]float64)
+	totalsByDate := make(map[string]float64)
+
+	addCode := func(key, name, date string, hours float64) {
+		code, ok := codeByKey[key]
+		if !ok {
+			code = &submissionChargeCode{key: key, name: name}
+			codeByKey[key] = code
+		}
+		code.total += hours
+		if hoursByDateCode[date] == nil {
+			hoursByDateCode[date] = make(map[string]float64)
+		}
+		hoursByDateCode[date][key] += hours
+		totalsByDate[date] += hours
+	}
+
+	for _, entry := range m.submissionEntries {
+		date := dateString(entry.Date)
+		if date == "" {
+			continue
+		}
+		key := "project\x00" + entry.JobID + "\x00" + entry.TaskID
+		job := m.jobByID(entry.JobID)
+		client := m.clientByID(job.ClientID)
+		task := m.taskByID(entry.TaskID)
+		projectName := job.Label()
+		if projectName == "" {
+			projectName = entry.JobID
+		}
+		if clientName := client.Label(); clientName != "" && clientName != projectName {
+			projectName = clientName + " / " + projectName
+		}
+		taskName := task.Label()
+		if taskName == "" {
+			taskName = entry.TaskID
+		}
+		addCode(key, projectName+" / "+taskName, date, float64(entry.Hours))
+	}
+
+	for _, entry := range m.submissionTimeOff {
+		date := dateString(entry.Date)
+		if date == "" {
+			continue
+		}
+		timeOffType := m.timeOffTypeByID(entry.TimeOffTypeID)
+		typeName := timeOffType.Label()
+		if typeName == "" {
+			typeName = entry.TimeOffTypeID
+		}
+		key := "timeoff\x00" + entry.TimeOffTypeID
+		addCode(key, "Time Off / "+typeName, date, float64(entry.Hours))
+	}
+
+	codes := make([]submissionChargeCode, 0, len(codeByKey))
+	for _, code := range codeByKey {
+		codes = append(codes, *code)
+	}
+	sort.Slice(codes, func(i, j int) bool {
+		return codes[i].name < codes[j].name
+	})
+	for index := range codes {
+		codes[index].alias = fmt.Sprintf("Code%d", index+1)
+	}
+	return codes, hoursByDateCode, totalsByDate
+}
+
+func joinSubmissionWeekBlocks(weekViews []string) string {
+	if len(weekViews) == 0 {
+		return ""
+	}
+	if len(weekViews) == 1 {
+		return weekViews[0]
+	}
+
+	linesByWeek := make([][]string, 0, len(weekViews))
+	maxHeight := 0
+	widths := make([]int, 0, len(weekViews))
+	for _, week := range weekViews {
+		lines := strings.Split(week, "\n")
+		linesByWeek = append(linesByWeek, lines)
+		maxHeight = max(maxHeight, len(lines))
+		widths = append(widths, lipgloss.Width(week))
+	}
+
+	var body strings.Builder
+	for lineIndex := 0; lineIndex < maxHeight; lineIndex++ {
+		if lineIndex > 0 {
+			body.WriteString("\n")
+		}
+		for weekIndex, lines := range linesByWeek {
+			if weekIndex > 0 {
+				body.WriteString(tableBorderStyle.Render(" │ "))
+			}
+			line := ""
+			if lineIndex < len(lines) {
+				line = lines[lineIndex]
+			}
+			body.WriteString(lipgloss.NewStyle().Width(widths[weekIndex]).Render(line))
+		}
+	}
+	return body.String()
+}
+
+func submissionWeekBlock(title string, headers []string, rows [][]string, emptyRows []bool) string {
+	dateWidth := 12
+	codeWidth := 9
+	var body strings.Builder
+	body.WriteString(subtitleStyle.Width(dateWidth + codeWidth*(len(headers)-1)).Render(title))
+	body.WriteString("\n")
+	for index, header := range headers {
+		width := codeWidth
+		align := lipgloss.Right
+		if index == 0 {
+			width = dateWidth
+			align = lipgloss.Left
+		}
+		body.WriteString(tableHeaderStyle.Padding(0).Width(width).Align(align).Render(header))
+	}
+	for rowIndex, row := range rows {
+		body.WriteString("\n")
+		for colIndex, value := range row {
+			width := codeWidth
+			align := lipgloss.Right
+			style := tableCellStyle.Padding(0).Width(width).Align(align)
+			if colIndex == 0 {
+				if rowIndex < len(emptyRows) && emptyRows[rowIndex] {
+					body.WriteString(emptyDayStyle.Render(value))
+					body.WriteString(strings.Repeat(" ", max(0, dateWidth-lipgloss.Width(value))))
+					continue
+				}
+				width = dateWidth
+				align = lipgloss.Left
+				style = tableCellStyle.Padding(0).Width(width).Align(align)
+			}
+			body.WriteString(style.Render(value))
+		}
+	}
+	return body.String()
+}
+
+func isWeekday(date time.Time) bool {
+	return date.Weekday() >= time.Monday && date.Weekday() <= time.Friday
 }
 
 func hasTimesheetAction(actions []clicktime.TimesheetAction, action string) bool {
@@ -1551,6 +1783,19 @@ func loadTimesheetForSubmissionCmd(api *clicktime.Client, date time.Time) tea.Cm
 		if strings.TrimSpace(timesheet.ID) == "" {
 			return operationErrorMsg{op: "load timesheet", err: fmt.Errorf("ClickTime did not return a timesheet ID for %s", date.Format(time.DateOnly))}
 		}
+		start, startErr := time.Parse(time.DateOnly, dateString(timesheet.StartDate))
+		end, endErr := time.Parse(time.DateOnly, dateString(timesheet.EndDate))
+		if startErr != nil || endErr != nil || end.Before(start) {
+			return operationErrorMsg{op: "load timesheet", err: fmt.Errorf("ClickTime returned an invalid timesheet period: %s", displayDateRange(timesheet.StartDate, timesheet.EndDate))}
+		}
+		entries, err := api.TimeEntries(ctx, start, end)
+		if err != nil {
+			return operationErrorMsg{op: "load timesheet", err: err}
+		}
+		timeOffEntries, err := api.TimeOff(ctx, start, end)
+		if err != nil {
+			return operationErrorMsg{op: "load timesheet", err: err}
+		}
 		actions, err := api.TimesheetActions(ctx, timesheet.ID)
 		if err != nil {
 			return operationErrorMsg{op: "load timesheet", err: err}
@@ -1562,6 +1807,8 @@ func loadTimesheetForSubmissionCmd(api *clicktime.Client, date time.Time) tea.Cm
 		return timesheetReadyMsg{
 			timesheet: timesheet, actions: actions,
 			attestationStatement: company.AttestationStatement,
+			entries:              entries,
+			timeOffEntries:       timeOffEntries,
 		}
 	}
 }
