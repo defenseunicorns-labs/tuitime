@@ -225,7 +225,20 @@ func NewAt(api *clicktime.Client, now func() time.Time) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, loadAllCmd(m.api, m.weekStart))
+	return m.withSpinner(loadAllCmd(m.api, m.weekStart))
+}
+
+func (m Model) withSpinner(cmd tea.Cmd) tea.Cmd {
+	return tea.Batch(m.spinner.Tick, cmd)
+}
+
+func (m Model) spinnerActive() bool {
+	switch m.screen {
+	case screenLoading, screenTaskLoading, screenSaving:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -235,6 +248,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.resize()
 		return m, nil
 	case spinner.TickMsg:
+		if !m.spinnerActive() {
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
@@ -286,7 +302,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = entryLabel + " " + verb + "."
 		m.screen = screenLoading
 		m.loadingText = "Refreshing your week"
-		return m, loadEntriesCmd(m.api, m.weekStart)
+		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
 	case operationErrorMsg:
 		m.lastError = msg.err
 		switch msg.op {
@@ -325,7 +341,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = screenLoading
 			m.loadingText = "Retrying ClickTime"
 			m.lastError = nil
-			return m, loadAllCmd(m.api, m.weekStart)
+			return m, m.withSpinner(loadAllCmd(m.api, m.weekStart))
 		}
 	}
 	return m, nil
@@ -376,12 +392,12 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = screenLoading
 		m.loadingText = "Loading the current week"
 		m.lastError = nil
-		return m, loadEntriesCmd(m.api, start)
+		return m, m.withSpinner(loadEntriesCmd(m.api, start))
 	case "r":
 		m.screen = screenLoading
 		m.loadingText = "Refreshing your week"
 		m.lastError = nil
-		return m, loadEntriesCmd(m.api, m.weekStart)
+		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
 	case "n":
 		m.beginNewEntry(m.selectedDate())
 	case "e", "enter":
@@ -412,7 +428,7 @@ func (m Model) changeWeek(days int) (tea.Model, tea.Cmd) {
 	m.screen = screenLoading
 	m.loadingText = "Loading week of " + m.weekStart.Format("Jan 2")
 	m.lastError = nil
-	return m, loadEntriesCmd(m.api, m.weekStart)
+	return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
 }
 
 func (m *Model) beginNewEntry(date time.Time) {
@@ -635,7 +651,7 @@ func (m Model) updatePicker(message tea.Msg, key tea.KeyMsg) (tea.Model, tea.Cmd
 			m.screen = screenTaskLoading
 			m.loadingText = "Loading tasks for " + selected.title
 			m.lastError = nil
-			return m, loadTasksCmd(m.api, selected.id)
+			return m, m.withSpinner(loadTasksCmd(m.api, selected.id))
 		case pickerTask:
 			m.draft.taskID = selected.id
 			m.draft.taskName = selected.title
@@ -766,7 +782,7 @@ func (m Model) updateReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = screenSaving
 		m.loadingText = "Saving your time entry"
 		m.lastError = nil
-		return m, saveEntryCmd(m.api, m.draft)
+		return m, m.withSpinner(saveEntryCmd(m.api, m.draft))
 	}
 	return m, nil
 }

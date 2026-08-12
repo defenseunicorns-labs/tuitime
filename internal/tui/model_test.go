@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -278,6 +279,47 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
 	if got := updated.(Model).weekStart.Format(time.DateOnly); got != "2026-08-03" {
 		t.Fatalf("] week = %s, want 2026-08-03", got)
+	}
+}
+
+func TestSpinnerRunsOnlyOnLoadingScreens(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return now })
+	model.screen = screenDashboard
+
+	before := model.spinner.View()
+	updated, cmd := model.Update(model.spinner.Tick())
+	dashboard := updated.(Model)
+	if cmd != nil {
+		t.Fatal("spinner scheduled another tick on the dashboard")
+	}
+	if dashboard.spinner.View() != before {
+		t.Fatalf("dashboard spinner advanced from %q to %q", before, dashboard.spinner.View())
+	}
+
+	updated, cmd = dashboard.changeWeek(7)
+	loading := updated.(Model)
+	if !loading.spinnerActive() || cmd == nil {
+		t.Fatalf("changeWeek() screen = %v, cmd = %v", loading.screen, cmd)
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("changeWeek() command = %#v, want spinner and load commands", cmd())
+	}
+	if _, ok := batch[0]().(spinner.TickMsg); !ok {
+		t.Fatalf("first loading command = %#v, want spinner.TickMsg", batch[0]())
+	}
+
+	before = loading.spinner.View()
+	updated, cmd = loading.Update(loading.spinner.Tick())
+	loading = updated.(Model)
+	if cmd == nil {
+		t.Fatal("spinner did not schedule another tick while loading")
+	}
+	if loading.spinner.View() == before {
+		t.Fatalf("loading spinner did not advance from %q", before)
 	}
 }
 
