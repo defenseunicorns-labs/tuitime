@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -460,7 +462,34 @@ func TestDashboardIsCenteredAndTabular(t *testing.T) {
 	}
 }
 
-func TestDashboardMarksTimesheetEnd(t *testing.T) {
+func TestLoadEntriesIncludesTimesheets(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Me/Timesheets":
+			_, _ = w.Write([]byte(`{"data":[{"ID":"sheet-1","StartDate":"2026-07-13","EndDate":"2026-07-16"}],"errors":[]}`))
+		case "/Me/TimeEntries", "/Me/TimeOff":
+			_, _ = w.Write([]byte(`{"data":[],"errors":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	week := time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC)
+	client := clicktime.NewWithBaseURL("secret", server.URL, server.Client())
+	message := loadEntriesCmd(client, week)()
+	loaded, ok := message.(entriesMsg)
+	if !ok {
+		t.Fatalf("loadEntriesCmd() = %#v, want entriesMsg", message)
+	}
+	if len(loaded.timesheets) != 1 || loaded.timesheets[0].EndDate != "2026-07-16" {
+		t.Fatalf("loadEntriesCmd() timesheets = %#v", loaded.timesheets)
+	}
+}
+
+func TestDashboardMarksClickTimeTimesheetEnd(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
 	model := Model{
@@ -473,18 +502,19 @@ func TestDashboardMarksTimesheetEnd(t *testing.T) {
 			ID: "entry-1", Date: "2026-07-15", Hours: 8,
 			JobID: "job-1", TaskID: "task-1",
 		}},
-		jobs:  []clicktime.Job{{ID: "job-1", Name: "Apollo"}},
-		tasks: []clicktime.Task{{ID: "task-1", Name: "Labor"}},
+		jobs:       []clicktime.Job{{ID: "job-1", Name: "Apollo"}},
+		tasks:      []clicktime.Task{{ID: "task-1", Name: "Labor"}},
+		timesheets: []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-07-16T00:00:00Z"}},
 	}
 	view := model.View()
-	if !strings.Contains(view, "Wed 15※") {
-		t.Fatalf("dashboard does not mark today when it is a timesheet end:\n%s", view)
+	if !strings.Contains(view, "Wed 15*") || strings.Contains(view, "Wed 15※") {
+		t.Fatalf("dashboard does not mark today independently of the period end:\n%s", view)
 	}
-	if !strings.Contains(view, "+ timesheet end") {
-		t.Fatalf("dashboard does not explain timesheet end marker:\n%s", view)
+	if !strings.Contains(view, "Thu 16+") {
+		t.Fatalf("dashboard does not mark the ClickTime period end:\n%s", view)
 	}
-	if !strings.Contains(view, "※ today and timesheet end") {
-		t.Fatalf("dashboard does not explain combined marker:\n%s", view)
+	if !strings.Contains(view, "+ timesheet end") || !strings.Contains(view, "※ today and timesheet end") {
+		t.Fatalf("dashboard does not explain timesheet markers:\n%s", view)
 	}
 	legend := strings.Index(view, "* today")
 	help := strings.Index(view, "q quit")
@@ -492,9 +522,16 @@ func TestDashboardMarksTimesheetEnd(t *testing.T) {
 		t.Fatalf("dashboard marker legend should appear below the controls:\n%s", view)
 	}
 
-	model.weekStart = time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model.timesheets = []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-07-15"}}
 	view = model.View()
-	if !strings.Contains(view, "Fri 31+") {
-		t.Fatalf("dashboard does not mark month end as timesheet end:\n%s", view)
+	if !strings.Contains(view, "Wed 15※") {
+		t.Fatalf("dashboard does not combine today and timesheet end markers:\n%s", view)
+	}
+
+	model.weekStart = time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model.timesheets = []clicktime.Timesheet{{ID: "sheet-2", EndDate: "2026-07-30"}}
+	view = model.View()
+	if !strings.Contains(view, "Thu 30+") || strings.Contains(view, "Fri 31+") {
+		t.Fatalf("dashboard still assumes the end of the month is a timesheet end:\n%s", view)
 	}
 }

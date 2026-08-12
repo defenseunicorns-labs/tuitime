@@ -130,12 +130,14 @@ type allDataMsg struct {
 	timeOffTypes   []clicktime.TimeOffType
 	entries        []clicktime.TimeEntry
 	timeOffEntries []clicktime.TimeOffEntry
+	timesheets     []clicktime.Timesheet
 	week           time.Time
 }
 
 type entriesMsg struct {
 	entries        []clicktime.TimeEntry
 	timeOffEntries []clicktime.TimeOffEntry
+	timesheets     []clicktime.Timesheet
 	week           time.Time
 }
 
@@ -168,6 +170,7 @@ type Model struct {
 	timeOffTypes   []clicktime.TimeOffType
 	entries        []clicktime.TimeEntry
 	timeOffEntries []clicktime.TimeOffEntry
+	timesheets     []clicktime.Timesheet
 
 	weekStart time.Time
 	cursor    int
@@ -243,6 +246,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.timeOffTypes = msg.timeOffTypes
 		m.entries = sortedEntries(msg.entries)
 		m.timeOffEntries = sortedTimeOffEntries(msg.timeOffEntries)
+		m.timesheets = append([]clicktime.Timesheet(nil), msg.timesheets...)
 		m.weekStart = msg.week
 		m.cursor = 0
 		m.dayCursor = dayIndexInWeek(m.now(), msg.week)
@@ -253,6 +257,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if sameDay(msg.week, m.weekStart) {
 			m.entries = sortedEntries(msg.entries)
 			m.timeOffEntries = sortedTimeOffEntries(msg.timeOffEntries)
+			m.timesheets = append([]clicktime.Timesheet(nil), msg.timesheets...)
 			m.cursor = min(m.cursor, max(0, len(m.timesheetRows())-1))
 		}
 		m.screen = screenDashboard
@@ -1110,7 +1115,12 @@ func (m Model) dayHeader(date time.Time) string {
 }
 
 func (m Model) isTimesheetEnd(date time.Time) bool {
-	return date.Day() == 15 || date.Day() == lastDayOfMonth(date)
+	for _, timesheet := range m.timesheets {
+		if dateString(timesheet.EndDate) == date.Format(time.DateOnly) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) selectedEntries() []trackedEntry {
@@ -1167,10 +1177,6 @@ func hiddenTimeOffType(name string) bool {
 	default:
 		return false
 	}
-}
-
-func lastDayOfMonth(date time.Time) int {
-	return time.Date(date.Year(), date.Month()+1, 0, 0, 0, 0, 0, date.Location()).Day()
 }
 
 func (m Model) totalForDate(date time.Time) float64 {
@@ -1291,6 +1297,10 @@ func loadAllCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
 		}
+		timesheets, err := api.Timesheets(ctx, week, weekEnd)
+		if err != nil {
+			return operationErrorMsg{op: "initial load", err: err}
+		}
 		entries, err := api.TimeEntries(ctx, week, weekEnd)
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
@@ -1301,7 +1311,7 @@ func loadAllCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		}
 		return allDataMsg{
 			me: me, clients: clients, jobs: jobs, tasks: tasks, timeOffTypes: timeOffTypes,
-			entries: entries, timeOffEntries: timeOffEntries, week: week,
+			entries: entries, timeOffEntries: timeOffEntries, timesheets: timesheets, week: week,
 		}
 	}
 }
@@ -1311,6 +1321,10 @@ func loadEntriesCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		weekEnd := week.AddDate(0, 0, 6)
+		timesheets, err := api.Timesheets(ctx, week, weekEnd)
+		if err != nil {
+			return operationErrorMsg{op: "load week", err: err}
+		}
 		entries, err := api.TimeEntries(ctx, week, weekEnd)
 		if err != nil {
 			return operationErrorMsg{op: "load week", err: err}
@@ -1319,7 +1333,7 @@ func loadEntriesCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		if err != nil {
 			return operationErrorMsg{op: "load week", err: err}
 		}
-		return entriesMsg{entries: entries, timeOffEntries: timeOffEntries, week: week}
+		return entriesMsg{entries: entries, timeOffEntries: timeOffEntries, timesheets: timesheets, week: week}
 	}
 }
 

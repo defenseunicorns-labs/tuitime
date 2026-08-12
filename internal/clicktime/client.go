@@ -185,6 +185,14 @@ func (e TimeEntry) Key() string {
 	return firstNonEmpty(e.ID, e.TimeEntryID)
 }
 
+type Timesheet struct {
+	ID               string `json:"ID"`
+	StartDate        string `json:"StartDate"`
+	EndDate          string `json:"EndDate"`
+	Status           string `json:"Status"`
+	HasBeenSubmitted bool   `json:"HasBeenSubmitted"`
+}
+
 // TimeEntryInput is the standard ClickTime time-entry payload. ClickTime calls
 // projects "Jobs" in its REST API.
 type TimeEntryInput struct {
@@ -340,6 +348,15 @@ func (c *Client) TimeOff(ctx context.Context, start, end time.Time) ([]TimeOffEn
 		"limit":    {"1000"},
 	}
 	return requestAll[TimeOffEntry](ctx, c, "/Me/TimeOff", query)
+}
+
+func (c *Client) Timesheets(ctx context.Context, start, end time.Time) ([]Timesheet, error) {
+	query := url.Values{
+		"FromDate": {start.Format(time.DateOnly)},
+		"ToDate":   {end.Format(time.DateOnly)},
+		"limit":    {"1000"},
+	}
+	return requestAll[Timesheet](ctx, c, "/Me/Timesheets", query)
 }
 
 func (c *Client) CreateTimeEntry(ctx context.Context, input TimeEntryInput) (TimeEntry, error) {

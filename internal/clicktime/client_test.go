@@ -56,6 +56,38 @@ func TestTimeEntries(t *testing.T) {
 	}
 }
 
+func TestTimesheets(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Me/Timesheets" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		query := r.URL.Query()
+		if query.Get("FromDate") != "2026-07-13" || query.Get("ToDate") != "2026-07-19" {
+			t.Errorf("timesheet dates = %s", r.URL.RawQuery)
+		}
+		if query.Get("limit") != "1000" || query.Get("offset") != "0" {
+			t.Errorf("timesheet pagination = %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"ID":"sheet-1","StartDate":"2026-07-13","EndDate":"2026-07-16","Status":"Open","HasBeenSubmitted":false},{"ID":"sheet-2","StartDate":"2026-07-17","EndDate":"2026-07-23","Status":"Waiting","HasBeenSubmitted":true}],"errors":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	start := time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC)
+	timesheets, err := client.Timesheets(context.Background(), start, start.AddDate(0, 0, 6))
+	if err != nil {
+		t.Fatalf("Timesheets() error = %v", err)
+	}
+	if len(timesheets) != 2 || timesheets[0].ID != "sheet-1" || timesheets[0].EndDate != "2026-07-16" {
+		t.Fatalf("Timesheets() = %#v", timesheets)
+	}
+	if timesheets[1].Status != "Waiting" || !timesheets[1].HasBeenSubmitted {
+		t.Fatalf("Timesheets()[1] = %#v", timesheets[1])
+	}
+}
+
 func TestPaginationUsesNextLinkWithoutCount(t *testing.T) {
 	t.Parallel()
 
