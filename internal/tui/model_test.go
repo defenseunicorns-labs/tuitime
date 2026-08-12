@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -321,6 +323,135 @@ func TestSpinnerRunsOnlyOnLoadingScreens(t *testing.T) {
 	if loading.spinner.View() == before {
 		t.Fatalf("loading spinner did not advance from %q", before)
 	}
+}
+
+func TestTimesheetSubmissionFlow(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/Timesheets/2026-07-15":
+			if r.URL.Query().Get("verbose") != "true" {
+				t.Errorf("timesheet query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":{"ID":"sheet-1","StartDate":"2026-07-01","EndDate":"2026-07-15","Status":"Open","DayTotals":[{"Date":"2026-07-01","Hours":8},{"Date":"2026-07-02","Hours":8},{"Date":"2026-07-03","Hours":8},{"Date":"2026-07-06","Hours":8},{"Date":"2026-07-07","Hours":8}]},"errors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/Timesheets/sheet-1/Actions":
+			_, _ = w.Write([]byte(`{"data":[{"Action":"Submit"}],"errors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/Company":
+			_, _ = w.Write([]byte(`{"data":{"ID":"company-1","AttestationStatement":"I certify that these hours are complete and accurate."},"errors":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/Me/Timesheets/sheet-1/Actions":
+			var input struct {
+				Action         string `json:"Action"`
+				HasAttestation bool   `json:"HasAttestation"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatalf("decode submit body: %v", err)
+			}
+			if input.Action != "Submit" || !input.HasAttestation {
+				t.Errorf("submit body = %#v", input)
+			}
+			_, _ = w.Write([]byte(`{"data":{"ID":"sheet-1","StartDate":"2026-07-01","EndDate":"2026-07-15","Status":"Waiting","HasBeenSubmitted":true},"errors":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	client := clicktime.NewWithBaseURL("secret", server.URL, server.Client())
+	model := NewAt(client, func() time.Time { return now })
+	model.screen = screenDashboard
+	model.weekStart = time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC)
+	model.dayCursor = 2
+	model.width, model.height = 100, 30
+
+	updated, cmd := model.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	loading := updated.(Model)
+	if loading.screen != screenTimesheetLoading || cmd == nil {
+		t.Fatalf("submit key screen = %v, cmd = %v", loading.screen, cmd)
+	}
+
+	updated, _ = loading.Update(nonSpinnerMessage(t, cmd))
+	review := updated.(Model)
+	if review.screen != screenTimesheetReview || review.timesheetToSubmit.ID != "sheet-1" {
+		t.Fatalf("timesheet review screen = %v, timesheet = %#v", review.screen, review.timesheetToSubmit)
+	}
+	view := review.View()
+	for _, text := range []string{"Submit this timesheet?", "Jul 1–15, 2026", "40.00", "entire period", "I certify that these hours are complete and accurate."} {
+		if !strings.Contains(view, text) {
+			t.Fatalf("timesheet review does not contain %q:\n%s", text, view)
+		}
+	}
+
+	updated, cmd = review.updateTimesheetReview(tea.KeyMsg{Type: tea.KeyEnter})
+	submitting := updated.(Model)
+	if submitting.screen != screenTimesheetSubmitting || cmd == nil {
+		t.Fatalf("confirm screen = %v, cmd = %v", submitting.screen, cmd)
+	}
+	updated, refreshCmd := submitting.Update(nonSpinnerMessage(t, cmd))
+	dashboardLoading := updated.(Model)
+	if dashboardLoading.screen != screenLoading || dashboardLoading.status != "Timesheet submitted for approval." || refreshCmd == nil {
+		t.Fatalf("submitted screen = %v, status = %q, cmd = %v", dashboardLoading.screen, dashboardLoading.status, refreshCmd)
+	}
+	if requests != 4 {
+		t.Fatalf("requests = %d, want 4", requests)
+	}
+}
+
+func TestTimesheetSubmissionRequiresAvailableAction(t *testing.T) {
+	t.Parallel()
+
+	model := NewAt(nil, time.Now)
+	model.screen = screenTimesheetLoading
+	updated, _ := model.Update(timesheetReadyMsg{
+		timesheet: clicktime.Timesheet{ID: "sheet-1", Status: "Waiting"},
+		actions:   []clicktime.TimesheetAction{{Action: "UndoSubmit"}},
+	})
+	dashboard := updated.(Model)
+	if dashboard.screen != screenDashboard || dashboard.lastError == nil {
+		t.Fatalf("unavailable action screen = %v, error = %v", dashboard.screen, dashboard.lastError)
+	}
+	if !strings.Contains(dashboard.lastError.Error(), "status: Waiting") {
+		t.Fatalf("unavailable action error = %q", dashboard.lastError)
+	}
+}
+
+func TestTimesheetSubmissionErrorReturnsToConfirmation(t *testing.T) {
+	t.Parallel()
+
+	model := NewAt(nil, time.Now)
+	model.screen = screenTimesheetSubmitting
+	model.timesheetToSubmit = clicktime.Timesheet{ID: "sheet-1"}
+	updated, _ := model.Update(operationErrorMsg{op: "submit timesheet", err: fmt.Errorf("submission blocked")})
+	review := updated.(Model)
+	if review.screen != screenTimesheetReview || review.lastError == nil {
+		t.Fatalf("submission error screen = %v, error = %v", review.screen, review.lastError)
+	}
+
+	updated, cmd := review.updateTimesheetReview(tea.KeyMsg{Type: tea.KeyEsc})
+	cancelled := updated.(Model)
+	if cancelled.screen != screenDashboard || cancelled.lastError != nil || cmd != nil {
+		t.Fatalf("cancel screen = %v, error = %v, cmd = %v", cancelled.screen, cancelled.lastError, cmd)
+	}
+}
+
+func nonSpinnerMessage(t *testing.T, cmd tea.Cmd) tea.Msg {
+	t.Helper()
+	message := cmd()
+	batch, ok := message.(tea.BatchMsg)
+	if !ok {
+		return message
+	}
+	for _, child := range batch {
+		message = child()
+		if _, isSpinner := message.(spinner.TickMsg); !isSpinner {
+			return message
+		}
+	}
+	t.Fatal("command batch contained only spinner ticks")
+	return nil
 }
 
 func TestEditEmptyProjectCellStartsNewEntryForSelectedRow(t *testing.T) {

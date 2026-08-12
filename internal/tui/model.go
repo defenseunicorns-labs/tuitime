@@ -30,6 +30,9 @@ const (
 	screenForm
 	screenReview
 	screenSaving
+	screenTimesheetLoading
+	screenTimesheetReview
+	screenTimesheetSubmitting
 	screenError
 )
 
@@ -145,6 +148,16 @@ type tasksMsg struct {
 	tasks []clicktime.Task
 }
 
+type timesheetReadyMsg struct {
+	timesheet            clicktime.Timesheet
+	actions              []clicktime.TimesheetAction
+	attestationStatement string
+}
+
+type timesheetSubmittedMsg struct {
+	timesheet clicktime.Timesheet
+}
+
 type savedMsg struct{}
 
 type operationErrorMsg struct {
@@ -172,11 +185,13 @@ type Model struct {
 	timeOffEntries []clicktime.TimeOffEntry
 	timesheets     []clicktime.Timesheet
 
-	weekStart time.Time
-	cursor    int
-	dayCursor int
-	status    string
-	lastError error
+	weekStart            time.Time
+	cursor               int
+	dayCursor            int
+	status               string
+	lastError            error
+	timesheetToSubmit    clicktime.Timesheet
+	attestationStatement string
 
 	picker         list.Model
 	pickerKind     pickerKind
@@ -234,7 +249,7 @@ func (m Model) withSpinner(cmd tea.Cmd) tea.Cmd {
 
 func (m Model) spinnerActive() bool {
 	switch m.screen {
-	case screenLoading, screenTaskLoading, screenSaving:
+	case screenLoading, screenTaskLoading, screenSaving, screenTimesheetLoading, screenTimesheetSubmitting:
 		return true
 	default:
 		return false
@@ -290,6 +305,28 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.openTaskPicker(resolved)
 		return m, nil
+	case timesheetReadyMsg:
+		m.timesheetToSubmit = msg.timesheet
+		m.attestationStatement = strings.TrimSpace(msg.attestationStatement)
+		if !hasTimesheetAction(msg.actions, "Submit") {
+			status := strings.TrimSpace(msg.timesheet.Status)
+			if status == "" {
+				status = "unknown"
+			}
+			m.screen = screenDashboard
+			m.lastError = fmt.Errorf("ClickTime does not currently allow this timesheet to be submitted (status: %s)", status)
+			return m, nil
+		}
+		m.screen = screenTimesheetReview
+		m.lastError = nil
+		return m, nil
+	case timesheetSubmittedMsg:
+		m.timesheetToSubmit = msg.timesheet
+		m.status = "Timesheet submitted for approval."
+		m.screen = screenLoading
+		m.loadingText = "Refreshing your week"
+		m.lastError = nil
+		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
 	case savedMsg:
 		verb := "created"
 		if m.draft.entryID != "" {
@@ -310,6 +347,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = screenError
 		case "save time entry":
 			m.screen = screenReview
+		case "submit timesheet":
+			m.screen = screenTimesheetReview
 		default:
 			m.screen = screenDashboard
 		}
@@ -333,6 +372,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateForm(message, key)
 	case screenReview:
 		return m.updateReview(key)
+	case screenTimesheetReview:
+		return m.updateTimesheetReview(key)
 	case screenError:
 		switch key.String() {
 		case "q":
@@ -398,6 +439,15 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loadingText = "Refreshing your week"
 		m.lastError = nil
 		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
+	case "s":
+		date := m.selectedDate()
+		m.screen = screenTimesheetLoading
+		m.loadingText = "Loading timesheet for " + date.Format("Jan 2")
+		m.status = ""
+		m.lastError = nil
+		m.timesheetToSubmit = clicktime.Timesheet{}
+		m.attestationStatement = ""
+		return m, m.withSpinner(loadTimesheetForSubmissionCmd(m.api, date))
 	case "n":
 		m.beginNewEntry(m.selectedDate())
 	case "e", "enter":
@@ -787,6 +837,24 @@ func (m Model) updateReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) updateTimesheetReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "b", "esc":
+		m.screen = screenDashboard
+		m.lastError = nil
+	case "y", "enter":
+		if strings.TrimSpace(m.timesheetToSubmit.ID) == "" {
+			m.lastError = fmt.Errorf("timesheet ID is missing; refresh and try again")
+			return m, nil
+		}
+		m.screen = screenTimesheetSubmitting
+		m.loadingText = "Submitting your timesheet"
+		m.lastError = nil
+		return m, m.withSpinner(submitTimesheetCmd(m.api, m.timesheetToSubmit.ID))
+	}
+	return m, nil
+}
+
 func (m *Model) setFormFocus(index int) {
 	m.blurForm()
 	m.formFocus = index
@@ -811,7 +879,7 @@ func (m Model) View() string {
 		return m.appFrame("The weekly table needs a terminal at least 100 columns wide.")
 	}
 	switch m.screen {
-	case screenLoading, screenTaskLoading, screenSaving:
+	case screenLoading, screenTaskLoading, screenSaving, screenTimesheetLoading, screenTimesheetSubmitting:
 		return m.loadingView()
 	case screenDashboard:
 		return m.dashboardView()
@@ -821,6 +889,8 @@ func (m Model) View() string {
 		return m.formView()
 	case screenReview:
 		return m.reviewView()
+	case screenTimesheetReview:
+		return m.timesheetReviewView()
 	case screenError:
 		return m.errorView()
 	default:
@@ -926,7 +996,7 @@ func (m Model) dashboardView() string {
 		body.WriteString("\n\n" + errorStyle.Render(m.lastError.Error()))
 	}
 	body.WriteString("\n\n")
-	body.WriteString(helpStyle.Render("hl/←→ day  jk/↑↓ row  [] week  n new  e edit  t today  r refresh  q quit"))
+	body.WriteString(helpStyle.Render("hl/←→ day  jk/↑↓ row  [] week  n new  e edit  s submit  t today  r refresh  q quit"))
 	body.WriteString("\n\n")
 	body.WriteString(mutedStyle.Render("* today | + timesheet end | ※ today and timesheet end"))
 	return m.appFrame(body.String())
@@ -1006,6 +1076,34 @@ func (m Model) reviewView() string {
 		body.WriteString("\n\n" + errorStyle.Render(m.lastError.Error()))
 	}
 	body.WriteString("\n\n" + helpStyle.Render("y enter confirm  b esc back"))
+	return m.appFrame(body.String())
+}
+
+func (m Model) timesheetReviewView() string {
+	timesheet := m.timesheetToSubmit
+	status := strings.TrimSpace(timesheet.Status)
+	if status == "" {
+		status = "Unknown"
+	}
+
+	var body strings.Builder
+	body.WriteString(titleStyle.Render("Submit this timesheet?") + "\n\n")
+	body.WriteString(summaryLine("Period", displayDateRange(timesheet.StartDate, timesheet.EndDate)) + "\n")
+	body.WriteString(summaryLine("Status", status) + "\n")
+	body.WriteString(summaryLine("Hours", strconv.FormatFloat(timesheet.TotalHours(), 'f', 2, 64)))
+	body.WriteString("\n\n" + subtitleStyle.Render("Submitting sends the entire period to ClickTime for approval."))
+	body.WriteString("\n" + mutedStyle.Render("You may not be able to edit its entries after submission."))
+	if statement := strings.TrimSpace(m.attestationStatement); statement != "" {
+		body.WriteString("\n\n" + subtitleStyle.Render("Attestation"))
+		body.WriteString("\n" + detailStyle.Width(76).Render(statement))
+		body.WriteString("\n" + mutedStyle.Render("By confirming, you agree to this attestation."))
+	} else {
+		body.WriteString("\n\n" + detailStyle.Render("By confirming, you attest that this timesheet is complete and accurate."))
+	}
+	if m.lastError != nil {
+		body.WriteString("\n\n" + errorStyle.Render(m.lastError.Error()))
+	}
+	body.WriteString("\n\n" + helpStyle.Render("y enter submit  b esc cancel"))
 	return m.appFrame(body.String())
 }
 
@@ -1133,6 +1231,15 @@ func (m Model) dayHeader(date time.Time) string {
 func (m Model) isTimesheetEnd(date time.Time) bool {
 	for _, timesheet := range m.timesheets {
 		if dateString(timesheet.EndDate) == date.Format(time.DateOnly) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTimesheetAction(actions []clicktime.TimesheetAction, action string) bool {
+	for _, available := range actions {
+		if strings.EqualFold(strings.TrimSpace(available.Action), strings.TrimSpace(action)) {
 			return true
 		}
 	}
@@ -1353,6 +1460,44 @@ func loadEntriesCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 	}
 }
 
+func loadTimesheetForSubmissionCmd(api *clicktime.Client, date time.Time) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		timesheet, err := api.TimesheetForDate(ctx, date)
+		if err != nil {
+			return operationErrorMsg{op: "load timesheet", err: err}
+		}
+		if strings.TrimSpace(timesheet.ID) == "" {
+			return operationErrorMsg{op: "load timesheet", err: fmt.Errorf("ClickTime did not return a timesheet ID for %s", date.Format(time.DateOnly))}
+		}
+		actions, err := api.TimesheetActions(ctx, timesheet.ID)
+		if err != nil {
+			return operationErrorMsg{op: "load timesheet", err: err}
+		}
+		company, err := api.Company(ctx)
+		if err != nil {
+			return operationErrorMsg{op: "load timesheet", err: err}
+		}
+		return timesheetReadyMsg{
+			timesheet: timesheet, actions: actions,
+			attestationStatement: company.AttestationStatement,
+		}
+	}
+}
+
+func submitTimesheetCmd(api *clicktime.Client, timesheetID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		timesheet, err := api.SubmitTimesheet(ctx, timesheetID, clicktime.TimesheetSubmitInput{HasAttestation: true})
+		if err != nil {
+			return operationErrorMsg{op: "submit timesheet", err: err}
+		}
+		return timesheetSubmittedMsg{timesheet: timesheet}
+	}
+}
+
 func loadTasksCmd(api *clicktime.Client, jobID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
@@ -1534,6 +1679,22 @@ func displayDate(value string) string {
 		return value
 	}
 	return date.Format("Mon, Jan 2, 2006")
+}
+
+func displayDateRange(startValue, endValue string) string {
+	start, startErr := time.Parse(time.DateOnly, dateString(startValue))
+	end, endErr := time.Parse(time.DateOnly, dateString(endValue))
+	if startErr != nil || endErr != nil {
+		return displayDate(startValue) + " – " + displayDate(endValue)
+	}
+	switch {
+	case start.Year() == end.Year() && start.Month() == end.Month():
+		return fmt.Sprintf("%s %d–%d, %d", start.Format("Jan"), start.Day(), end.Day(), end.Year())
+	case start.Year() == end.Year():
+		return fmt.Sprintf("%s – %s, %d", start.Format("Jan 2"), end.Format("Jan 2"), end.Year())
+	default:
+		return start.Format("Jan 2, 2006") + " – " + end.Format("Jan 2, 2006")
+	}
 }
 
 func sameDay(a, b time.Time) bool {

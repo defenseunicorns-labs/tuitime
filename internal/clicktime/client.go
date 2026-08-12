@@ -75,6 +75,12 @@ type Me struct {
 	Email     string `json:"Email"`
 }
 
+type Company struct {
+	ID                   string `json:"ID"`
+	Name                 string `json:"Name"`
+	AttestationStatement string `json:"AttestationStatement"`
+}
+
 func (m Me) DisplayName() string {
 	if strings.TrimSpace(m.Name) != "" {
 		return m.Name
@@ -325,6 +331,12 @@ func (e responseEnvelope) messages() []string {
 func (c *Client) Me(ctx context.Context) (Me, error) {
 	var result Me
 	err := c.request(ctx, http.MethodGet, "/Me", nil, nil, &result)
+	return result, err
+}
+
+func (c *Client) Company(ctx context.Context) (Company, error) {
+	var result Company
+	err := c.request(ctx, http.MethodGet, "/Company", nil, nil, &result)
 	return result, err
 }
 

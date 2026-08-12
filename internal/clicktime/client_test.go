@@ -233,6 +233,27 @@ func TestPaginationDiscardsPartialResultsOnFailure(t *testing.T) {
 	}
 }
 
+func TestCompany(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/Company" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":{"ID":"company-1","Name":"Acme","AttestationStatement":"I certify this timesheet is accurate."},"errors":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	company, err := client.Company(context.Background())
+	if err != nil {
+		t.Fatalf("Company() error = %v", err)
+	}
+	if company.ID != "company-1" || company.AttestationStatement != "I certify this timesheet is accurate." {
+		t.Fatalf("Company() = %#v", company)
+	}
+}
+
 func TestCreateTimeEntry(t *testing.T) {
 	t.Parallel()
 

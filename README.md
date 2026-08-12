@@ -13,6 +13,7 @@ A small terminal UI for filling out a ClickTime timesheet. It is written in Go w
 - Enter the date, hours, and notes
 - Review an entry before it is sent to ClickTime
 - Edit an existing entry and confirm the update
+- Submit the ClickTime timesheet containing the selected day for approval
 - Filter client, project, and task pickers
 
 ClickTime calls projects **Jobs** in its API; tuitime uses the friendlier “Project” label in the UI.
@@ -53,6 +54,7 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 | `[]` | Previous or next week |
 | `n` | Add an entry in the selected day |
 | `e` `enter` | Edit the selected cell; quick-add time if it is empty |
+| `s` | Review and submit the timesheet containing the selected day |
 | `t` | Current week |
 | `r` | Refresh |
 | `q` | Quit |
@@ -66,6 +68,13 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 - In the form, `tab` moves between fields, `ctrl+r` opens review, and `esc` returns to the previous picker.
 - On review, `y` `enter` submits; `b` `esc` goes back.
 - `ctrl+c` exits from any screen.
+
+### Timesheet submission
+
+- Press `s` to load the ClickTime timesheet containing the selected day.
+- The confirmation screen shows ClickTime's full period, status, and total hours.
+- Submission is offered only when ClickTime reports `Submit` as an available action.
+- Press `y` or `enter` to attest that the timesheet is accurate and submit the entire period for approval; `b` or `esc` cancels.
 
 ## Development
 
