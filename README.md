@@ -1,6 +1,6 @@
 # tuitime
 
-A small terminal UI for filling out a ClickTime timesheet. It is written in Go with [Bubble Tea](https://github.com/charmbracelet/bubbletea), Bubbles, and Lip Gloss.
+![](assets/preview.png)
 
 ## Features
 
