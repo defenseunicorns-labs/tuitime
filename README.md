@@ -55,6 +55,7 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 | `[]` | Previous or next week |
 | `n` | Add an entry in the selected day |
 | `e` `enter` | Edit the selected cell; quick-add time if it is empty |
+| `d` | Review and delete all entries in the selected cell |
 | `s` | Review and submit the timesheet containing the selected day |
 | `t` | Current week |
 | `r` | Refresh |

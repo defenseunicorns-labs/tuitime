@@ -30,6 +30,7 @@ const (
 	screenForm
 	screenReview
 	screenSaving
+	screenDeleteReview
 	screenTimesheetLoading
 	screenTimesheetReview
 	screenTimesheetSubmitting
@@ -93,6 +94,13 @@ func (e trackedEntry) key() string {
 	return "project:" + e.project.Key()
 }
 
+func (e trackedEntry) entryID() string {
+	if e.kind == timeOffEntry {
+		return e.timeOff.Key()
+	}
+	return e.project.Key()
+}
+
 func (e trackedEntry) date() string {
 	if e.kind == timeOffEntry {
 		return e.timeOff.Date
@@ -112,6 +120,14 @@ func (e trackedEntry) comment() string {
 		return e.timeOff.Notes
 	}
 	return e.project.Comment
+}
+
+func totalTrackedHours(entries []trackedEntry) float64 {
+	var total float64
+	for _, entry := range entries {
+		total += entry.hours()
+	}
+	return total
 }
 
 type timesheetRow struct {
@@ -167,7 +183,9 @@ type timesheetSubmittedMsg struct {
 	timesheet clicktime.Timesheet
 }
 
-type savedMsg struct{}
+type savedMsg struct {
+	status string
+}
 
 type operationErrorMsg struct {
 	op  string
@@ -199,6 +217,7 @@ type Model struct {
 	dayCursor            int
 	status               string
 	lastError            error
+	pendingDeleteEntries []trackedEntry
 	timesheetToSubmit    clicktime.Timesheet
 	submissionEntries    []clicktime.TimeEntry
 	submissionTimeOff    []clicktime.TimeOffEntry
@@ -341,17 +360,22 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastError = nil
 		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
 	case savedMsg:
-		verb := "created"
-		if m.draft.entryID != "" {
-			verb = "updated"
+		if msg.status != "" {
+			m.status = msg.status
+		} else {
+			verb := "created"
+			if m.draft.entryID != "" {
+				verb = "updated"
+			}
+			entryLabel := "Time entry"
+			if m.draft.kind == timeOffEntry {
+				entryLabel = "Time off entry"
+			}
+			m.status = entryLabel + " " + verb + "."
 		}
-		entryLabel := "Time entry"
-		if m.draft.kind == timeOffEntry {
-			entryLabel = "Time off entry"
-		}
-		m.status = entryLabel + " " + verb + "."
 		m.screen = screenLoading
 		m.loadingText = "Refreshing your week"
+		m.pendingDeleteEntries = nil
 		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
 	case operationErrorMsg:
 		m.lastError = msg.err
@@ -360,6 +384,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = screenError
 		case "save time entry":
 			m.screen = screenReview
+		case "delete time entry":
+			m.screen = screenDeleteReview
 		case "submit timesheet":
 			m.screen = screenTimesheetReview
 		default:
@@ -385,6 +411,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateForm(message, key)
 	case screenReview:
 		return m.updateReview(key)
+	case screenDeleteReview:
+		return m.updateDeleteReview(key)
 	case screenTimesheetReview:
 		return m.updateTimesheetReview(key)
 	case screenError:
@@ -483,6 +511,22 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		default:
 			m.openEntryPicker(entries)
 		}
+	case "d":
+		entries := m.selectedEntries()
+		if len(entries) == 0 {
+			m.status = "There are no entries in that cell to delete."
+			return m, nil
+		}
+		for _, entry := range entries {
+			if entry.entryID() == "" {
+				m.status = "ClickTime did not return an ID for that entry, so it cannot be deleted."
+				return m, nil
+			}
+		}
+		m.pendingDeleteEntries = append([]trackedEntry(nil), entries...)
+		m.screen = screenDeleteReview
+		m.status = ""
+		m.lastError = nil
 	}
 	return m, nil
 }
@@ -852,6 +896,27 @@ func (m Model) updateReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) updateDeleteReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "b", "esc":
+		m.screen = screenDashboard
+		m.pendingDeleteEntries = nil
+		m.lastError = nil
+	case "y", "enter":
+		if len(m.pendingDeleteEntries) == 0 {
+			m.screen = screenDashboard
+			m.status = "There are no entries in that cell to delete."
+			m.lastError = nil
+			return m, nil
+		}
+		m.screen = screenSaving
+		m.loadingText = "Deleting selected cell"
+		m.lastError = nil
+		return m, m.withSpinner(deleteEntriesCmd(m.api, m.pendingDeleteEntries))
+	}
+	return m, nil
+}
+
 func (m Model) updateTimesheetReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "b", "esc":
@@ -904,6 +969,8 @@ func (m Model) View() string {
 		return m.formView()
 	case screenReview:
 		return m.reviewView()
+	case screenDeleteReview:
+		return m.deleteReviewView()
 	case screenTimesheetReview:
 		return m.timesheetReviewView()
 	case screenError:
@@ -1015,7 +1082,7 @@ func (m Model) dashboardView() string {
 		body.WriteString("\n\n" + errorStyle.Render(m.lastError.Error()))
 	}
 	body.WriteString("\n\n")
-	body.WriteString(helpStyle.Render("hl/←→ day  jk/↑↓ row  [] week  n new  e edit  s submit  t today  r refresh  q quit"))
+	body.WriteString(helpStyle.Render("hl/←→ day  jk/↑↓ row  [] week  n new  e edit  d delete  s submit  t today  r refresh  q quit"))
 	body.WriteString("\n\n")
 	body.WriteString(mutedStyle.Render("* today | + timesheet end | ※ today and timesheet end"))
 	return m.appFrame(body.String())
@@ -1096,6 +1163,57 @@ func (m Model) reviewView() string {
 	}
 	body.WriteString("\n\n" + helpStyle.Render("y enter confirm  b esc back"))
 	return m.appFrame(body.String())
+}
+
+func (m Model) deleteReviewView() string {
+	entries := m.pendingDeleteEntries
+	var body strings.Builder
+	body.WriteString(titleStyle.Render("Delete selected cell?") + "\n\n")
+	body.WriteString(summaryLine("Entries", strconv.Itoa(len(entries))) + "\n")
+	body.WriteString(summaryLine("Hours", strconv.FormatFloat(totalTrackedHours(entries), 'f', 2, 64)))
+	for _, entry := range entries {
+		body.WriteString("\n")
+		body.WriteString(mutedStyle.Render("  " + m.deleteEntrySummary(entry)))
+	}
+	if m.lastError != nil {
+		body.WriteString("\n\n" + errorStyle.Render(m.lastError.Error()))
+	}
+	body.WriteString("\n\n" + helpStyle.Render("y enter delete  b esc cancel"))
+	return m.appFrame(body.String())
+}
+
+func (m Model) deleteEntrySummary(entry trackedEntry) string {
+	name := ""
+	if entry.kind == timeOffEntry {
+		timeOffType := m.timeOffTypeByID(entry.timeOff.TimeOffTypeID)
+		name = "Time Off / " + firstDisplayValue(timeOffType.Label(), entry.timeOff.TimeOffTypeID)
+	} else {
+		project := entry.project
+		job := m.jobByID(project.JobID)
+		client := m.clientByID(job.ClientID)
+		task := m.taskByID(project.TaskID)
+		projectName := firstDisplayValue(job.Label(), project.JobID)
+		if clientName := client.Label(); clientName != "" && clientName != projectName {
+			projectName = clientName + " / " + projectName
+		}
+		taskName := firstDisplayValue(task.Label(), project.TaskID)
+		name = projectName + " / " + taskName
+	}
+
+	summary := fmt.Sprintf("%s · %s · %.2fh", name, displayDate(entry.date()), entry.hours())
+	if note := oneLine(entry.comment()); note != "" {
+		summary += " · " + note
+	}
+	return summary
+}
+
+func firstDisplayValue(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (m Model) timesheetReviewView() string {
@@ -1868,6 +1986,29 @@ func saveEntryCmd(api *clicktime.Client, value draft) tea.Cmd {
 			return operationErrorMsg{op: "save time entry", err: err}
 		}
 		return savedMsg{}
+	}
+}
+
+func deleteEntriesCmd(api *clicktime.Client, entries []trackedEntry) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		for _, entry := range entries {
+			var err error
+			if entry.kind == timeOffEntry {
+				err = api.DeleteTimeOff(ctx, entry.entryID())
+			} else {
+				err = api.DeleteTimeEntry(ctx, entry.entryID())
+			}
+			if err != nil {
+				return operationErrorMsg{op: "delete time entry", err: err}
+			}
+		}
+		status := "Selected cell deleted."
+		if len(entries) == 1 {
+			status = "Entry deleted."
+		}
+		return savedMsg{status: status}
 	}
 }
 
