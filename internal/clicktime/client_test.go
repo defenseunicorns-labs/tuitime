@@ -288,6 +288,29 @@ func TestCreateTimeEntry(t *testing.T) {
 	}
 }
 
+func TestDeleteTimeEntry(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("method = %q", r.Method)
+		}
+		if r.URL.Path != "/Me/TimeEntries/entry-2" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := NewWithBaseURL("secret", server.URL, server.Client())
+	if err := client.DeleteTimeEntry(context.Background(), "entry-2"); err != nil {
+		t.Fatalf("DeleteTimeEntry() error = %v", err)
+	}
+	if err := client.DeleteTimeEntry(context.Background(), ""); err == nil {
+		t.Fatal("DeleteTimeEntry() with empty ID succeeded")
+	}
+}
+
 func TestAPIError(t *testing.T) {
 	t.Parallel()
 
@@ -397,6 +420,8 @@ func TestTimeOff(t *testing.T) {
 				t.Errorf("update time off body contains read-only Date field: %#v", input)
 			}
 			_, _ = w.Write([]byte(`{"data":{"ID":"off-1","Date":"2026-07-29","Hours":4,"Notes":"Half day","TimeOffTypeID":"vacation"},"errors":[]}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/Me/TimeOff/off-1":
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
 		}
@@ -425,8 +450,14 @@ func TestTimeOff(t *testing.T) {
 	if err != nil || entry.Key() != "off-1" || entry.Notes != "Half day" {
 		t.Fatalf("UpdateTimeOff() = %#v, %v", entry, err)
 	}
-	if requests != 4 {
-		t.Fatalf("requests = %d, want 4", requests)
+	if err := client.DeleteTimeOff(context.Background(), "off-1"); err != nil {
+		t.Fatalf("DeleteTimeOff() error = %v", err)
+	}
+	if err := client.DeleteTimeOff(context.Background(), ""); err == nil {
+		t.Fatal("DeleteTimeOff() with empty ID succeeded")
+	}
+	if requests != 5 {
+		t.Fatalf("requests = %d, want 5", requests)
 	}
 }
 

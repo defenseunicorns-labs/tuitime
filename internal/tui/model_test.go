@@ -511,6 +511,72 @@ func TestEditEmptyProjectCellStartsNewEntryForSelectedRow(t *testing.T) {
 	}
 }
 
+func TestDeleteSelectedCellDeletesAllEntries(t *testing.T) {
+	t.Parallel()
+
+	deleted := make(map[string]bool)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/Me/TimeEntries/entry-1":
+			deleted["entry-1"] = true
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/Me/TimeEntries/entry-2":
+			deleted["entry-2"] = true
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/Timesheets":
+			_, _ = w.Write([]byte(`{"data":[],"errors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/TimeEntries":
+			_, _ = w.Write([]byte(`{"data":[],"errors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/TimeOff":
+			_, _ = w.Write([]byte(`{"data":[],"errors":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	week := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model := NewAt(clicktime.NewWithBaseURL("secret", server.URL, server.Client()), func() time.Time { return week })
+	model.screen = screenDashboard
+	model.weekStart = week
+	model.clients = []clicktime.ClientResource{{ID: "client-1", Name: "Space"}}
+	model.jobs = []clicktime.Job{{ID: "job-1", ClientID: "client-1", Name: "Apollo"}}
+	model.tasks = []clicktime.Task{{ID: "task-1", Name: "Labor"}}
+	model.entries = []clicktime.TimeEntry{
+		{ID: "entry-1", Date: "2026-07-27", Hours: 2, JobID: "job-1", TaskID: "task-1", Comment: "Build"},
+		{ID: "entry-2", Date: "2026-07-27", Hours: 3, JobID: "job-1", TaskID: "task-1", Comment: "Test"},
+	}
+
+	updated, cmd := model.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	review := updated.(Model)
+	if review.screen != screenDeleteReview || cmd != nil {
+		t.Fatalf("delete review screen = %v, cmd = %v", review.screen, cmd)
+	}
+	view := review.View()
+	for _, text := range []string{"Delete selected cell?", "Entries", "2", "Hours", "5.00", "Space / Apollo / Labor · Mon, Jul 27, 2026 · 2.00h · Build", "Space / Apollo / Labor · Mon, Jul 27, 2026 · 3.00h · Test", "y enter delete  b esc cancel"} {
+		if !strings.Contains(view, text) {
+			t.Fatalf("delete review does not contain %q:\n%s", text, view)
+		}
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("delete ran before confirmation: %#v", deleted)
+	}
+
+	updated, cmd = review.updateDeleteReview(tea.KeyMsg{Type: tea.KeyEnter})
+	deleting := updated.(Model)
+	if deleting.screen != screenSaving || deleting.loadingText != "Deleting selected cell" || cmd == nil {
+		t.Fatalf("confirmed delete screen = %v, loading = %q, cmd = %v", deleting.screen, deleting.loadingText, cmd)
+	}
+	updated, refreshCmd := deleting.Update(nonSpinnerMessage(t, cmd))
+	refreshing := updated.(Model)
+	if refreshing.screen != screenLoading || refreshing.status != "Selected cell deleted." || refreshCmd == nil {
+		t.Fatalf("refresh screen = %v, status = %q, cmd = %v", refreshing.screen, refreshing.status, refreshCmd)
+	}
+	if !deleted["entry-1"] || !deleted["entry-2"] {
+		t.Fatalf("deleted entries = %#v", deleted)
+	}
+}
+
 func TestEntryFormDateIsReadOnly(t *testing.T) {
 	t.Parallel()
 	model := NewAt(nil, func() time.Time {

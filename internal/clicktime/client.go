@@ -456,6 +456,14 @@ func (c *Client) UpdateTimeEntry(ctx context.Context, entryID string, input Time
 	return result, err
 }
 
+func (c *Client) DeleteTimeEntry(ctx context.Context, entryID string) error {
+	if strings.TrimSpace(entryID) == "" {
+		return errors.New("time entry ID is required")
+	}
+	path := "/Me/TimeEntries/" + url.PathEscape(entryID)
+	return c.request(ctx, http.MethodDelete, path, nil, nil, nil)
+}
+
 func (c *Client) CreateTimeOff(ctx context.Context, input TimeOffInput) (TimeOffEntry, error) {
 	var result TimeOffEntry
 	err := c.request(ctx, http.MethodPost, "/Me/TimeOff", nil, input, &result)
@@ -470,6 +478,14 @@ func (c *Client) UpdateTimeOff(ctx context.Context, entryID string, input TimeOf
 	path := "/Me/TimeOff/" + url.PathEscape(entryID)
 	err := c.request(ctx, http.MethodPatch, path, nil, input, &result)
 	return result, err
+}
+
+func (c *Client) DeleteTimeOff(ctx context.Context, entryID string) error {
+	if strings.TrimSpace(entryID) == "" {
+		return errors.New("time off entry ID is required")
+	}
+	path := "/Me/TimeOff/" + url.PathEscape(entryID)
+	return c.request(ctx, http.MethodDelete, path, nil, nil, nil)
 }
 
 func requestAll[T any](ctx context.Context, client *Client, path string, query url.Values) ([]T, error) {
