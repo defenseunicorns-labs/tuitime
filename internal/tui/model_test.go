@@ -352,6 +352,9 @@ func TestTimesheetSubmissionFlow(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/Company":
 			_, _ = w.Write([]byte(`{"data":{"ID":"company-1","AttestationStatement":"I certify that these hours are complete and accurate."},"errors":[]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/Me/Timesheets/sheet-1/Actions":
+			if r.URL.Query().Get("verbose") != "true" || r.Header.Get("X-Browser") != "WebApp" {
+				t.Errorf("timesheet submission request query = %q, X-Browser = %q", r.URL.RawQuery, r.Header.Get("X-Browser"))
+			}
 			var input struct {
 				Action         string `json:"Action"`
 				HasAttestation bool   `json:"HasAttestation"`

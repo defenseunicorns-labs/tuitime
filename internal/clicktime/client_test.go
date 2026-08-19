@@ -106,6 +106,12 @@ func TestTimesheetSubmissionAPI(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"data":[{"Action":"Submit"}],"errors":[]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/Me/Timesheets/sheet-1/Actions":
+			if r.URL.Query().Get("verbose") != "true" {
+				t.Errorf("timesheet submission query = %s", r.URL.RawQuery)
+			}
+			if r.Header.Get("X-Browser") != "WebApp" || r.Header.Get("Accept") != "*/*" {
+				t.Errorf("timesheet submission headers = %#v", r.Header)
+			}
 			var input struct {
 				Action          string   `json:"Action"`
 				Comment         string   `json:"Comment"`
@@ -161,6 +167,35 @@ func TestTimesheetSubmissionAPI(t *testing.T) {
 	if requests != 3 {
 		t.Fatalf("requests = %d, want 3", requests)
 	}
+}
+
+func TestProductionTimesheetSubmissionUsesWebAppEndpoint(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		called = true
+		if r.URL.Scheme != "https" || r.URL.Host != "app.clicktime.com" || r.URL.Path != "/v2/Me/Timesheets/sheet-1/Actions" {
+			t.Errorf("submission URL = %s", r.URL)
+		}
+		if r.URL.Query().Get("verbose") != "true" || r.Header.Get("X-Browser") != "WebApp" {
+			t.Errorf("submission request query = %q, X-Browser = %q", r.URL.RawQuery, r.Header.Get("X-Browser"))
+		}
+		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
+	})}
+	client := NewWithBaseURL("secret", DefaultBaseURL, httpClient)
+	if _, err := client.SubmitTimesheet(context.Background(), "sheet-1", TimesheetSubmitInput{HasAttestation: true}); err != nil {
+		t.Fatalf("SubmitTimesheet() error = %v", err)
+	}
+	if !called {
+		t.Fatal("SubmitTimesheet() did not make a request")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
 
 func TestTimesheetSubmissionRequiresTarget(t *testing.T) {
