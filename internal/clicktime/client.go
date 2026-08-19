@@ -14,13 +14,18 @@ import (
 	"time"
 )
 
-const DefaultBaseURL = "https://api.clicktime.com/v2"
+const (
+	DefaultBaseURL             = "https://api.clicktime.com/v2"
+	defaultTimesheetActionsURL = "https://app.clicktime.com/v2"
+)
 
 // Client is a small client for the ClickTime REST API v2.
 type Client struct {
-	baseURL    string
-	token      string
-	httpClient *http.Client
+	baseURL             string
+	timesheetActionsURL string
+	token               string
+	httpClient          *http.Client
+	webAppRequest       bool
 }
 
 // New creates a ClickTime client using the production API.
@@ -34,11 +39,17 @@ func NewWithBaseURL(token, baseURL string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 20 * time.Second}
 	}
-	return &Client{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		token:      strings.TrimSpace(token),
-		httpClient: httpClient,
+	baseURL = strings.TrimRight(baseURL, "/")
+	client := &Client{
+		baseURL:             baseURL,
+		timesheetActionsURL: baseURL,
+		token:               strings.TrimSpace(token),
+		httpClient:          httpClient,
 	}
+	if baseURL == DefaultBaseURL {
+		client.timesheetActionsURL = defaultTimesheetActionsURL
+	}
+	return client
 }
 
 // Number accepts either a JSON number or a string containing a number. The
@@ -436,7 +447,11 @@ func (c *Client) SubmitTimesheet(ctx context.Context, timesheetID string, input 
 	}
 	var result Timesheet
 	path := "/Me/Timesheets/" + url.PathEscape(timesheetID) + "/Actions"
-	err := c.request(ctx, http.MethodPost, path, nil, payload, &result)
+	actionClient := *c
+	actionClient.baseURL = c.timesheetActionsURL
+	actionClient.webAppRequest = true
+	query := url.Values{"verbose": {"true"}}
+	err := actionClient.request(ctx, http.MethodPost, path, query, payload, &result)
 	return result, err
 }
 
@@ -552,7 +567,12 @@ func (c *Client) requestWithInfo(ctx context.Context, method, path string, query
 	if err != nil {
 		return responseInfo{}, fmt.Errorf("create ClickTime request: %w", err)
 	}
-	req.Header.Set("Accept", "application/json")
+	if c.webAppRequest {
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("X-Browser", "WebApp")
+	} else {
+		req.Header.Set("Accept", "application/json")
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Token "+c.token)
 
