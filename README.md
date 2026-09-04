@@ -9,7 +9,7 @@
 - Show each timesheet period's current status and highlight the period containing the selected day
 - Center the application within the terminal viewport
 - Move between days and weeks, and jump back to today
-- Create project time by choosing a project and task
+- Create project time from recently used project/task combinations or by browsing all projects
 - Create time off by choosing an available leave type
 - Enter the date, hours, and notes
 - Review an entry before it is sent to ClickTime
@@ -53,7 +53,7 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 | `kj↑↓` | Select a project/task row |
 | `hl←→` | Select a day |
 | `[]` | Previous or next week |
-| `n` | Add an entry in the selected day |
+| `n` | Add an entry in the selected day; recent projects are suggested first |
 | `e` `enter` | Edit the selected cell; quick-add time if it is empty |
 | `d` | Review and delete all entries in the selected cell |
 | `s` | Review and submit the timesheet containing the selected day |
@@ -63,7 +63,7 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 
 ### Entry workflow
 
-- Adding time first asks whether it is **Projects** or **Time Off**.
+- Pressing `n` looks back four weeks from the selected date and offers recently used project/task combinations. **Browse all projects** and **Time Off** remain available in that picker.
 - Pressing `e` on an empty project/task cell opens a new entry for that date and row.
 - In a picker, `/` starts filtering, `enter` selects, `esc` goes back one page, and `q` cancels the entry flow.
 - The selected date is read-only in the entry form.

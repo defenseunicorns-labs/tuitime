@@ -45,6 +45,7 @@ const (
 	pickerTask
 	pickerTimeOff
 	pickerEntry
+	pickerRecentProject
 )
 
 type entryKind int
@@ -169,6 +170,11 @@ type entriesMsg struct {
 
 type tasksMsg struct {
 	tasks []clicktime.Task
+}
+
+type recentProjectsMsg struct {
+	entries []clicktime.TimeEntry
+	err     error
 }
 
 type timesheetReadyMsg struct {
@@ -335,6 +341,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.openTaskPicker(resolved)
 		return m, nil
+	case recentProjectsMsg:
+		if msg.err != nil {
+			m.status = "Couldn't load recent projects; choose a project instead."
+			m.openCategoryPicker()
+			return m, nil
+		}
+		m.openRecentProjectPicker(msg.entries)
+		return m, nil
 	case timesheetReadyMsg:
 		m.timesheetToSubmit = msg.timesheet
 		m.submissionEntries = sortedEntries(msg.entries)
@@ -492,7 +506,14 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.attestationStatement = ""
 		return m, m.withSpinner(loadTimesheetForSubmissionCmd(m.api, date))
 	case "n":
-		m.beginNewEntry(m.selectedDate())
+		date := m.selectedDate()
+		m.status = ""
+		m.lastError = nil
+		m.draft = draft{date: date.Format(time.DateOnly)}
+		m.availableTasks = nil
+		m.screen = screenTaskLoading
+		m.loadingText = "Finding recently used projects"
+		return m, m.withSpinner(loadRecentProjectsCmd(m.api, date))
 	case "e", "enter":
 		entries := m.selectedEntries()
 		switch len(entries) {
@@ -597,6 +618,54 @@ func (m *Model) openCategoryPicker() {
 		pickerItem{id: "timeoff", title: "Time Off", description: "Vacation, sick leave, and other leave types"},
 	}
 	m.openPicker(pickerCategory, "What kind of time are you adding?", items)
+}
+
+func (m *Model) openRecentProjectPicker(entries []clicktime.TimeEntry) {
+	type recentProject struct {
+		entry clicktime.TimeEntry
+		date  time.Time
+	}
+	entries = append([]clicktime.TimeEntry(nil), entries...)
+	sort.SliceStable(entries, func(i, j int) bool {
+		return dateString(entries[i].Date) > dateString(entries[j].Date)
+	})
+	seen := make(map[string]bool)
+	recent := make([]recentProject, 0, len(entries))
+	for _, entry := range entries {
+		if entry.JobID == "" || entry.TaskID == "" {
+			continue
+		}
+		key := entry.JobID + "\x00" + entry.TaskID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		date, err := time.Parse(time.DateOnly, dateString(entry.Date))
+		if err != nil {
+			continue
+		}
+		recent = append(recent, recentProject{entry: entry, date: date})
+	}
+	sort.SliceStable(recent, func(i, j int) bool { return recent[i].date.After(recent[j].date) })
+
+	items := make([]list.Item, 0, len(recent)+2)
+	for _, suggestion := range recent {
+		entry := suggestion.entry
+		job := m.jobByID(entry.JobID)
+		if job.ID == "" {
+			continue // The project is no longer active or available to this user.
+		}
+		client := m.clientByID(job.ClientID)
+		task := m.taskByID(entry.TaskID)
+		description := firstDisplayValue(client.Label(), "—") + " · " + firstDisplayValue(task.Label(), entry.TaskID)
+		description += " · used " + suggestion.date.Format("Jan 2")
+		items = append(items, pickerItem{id: "recent:" + entry.JobID + "\x00" + entry.TaskID, title: job.Label(), description: description})
+	}
+	items = append(items,
+		pickerItem{id: "browse-projects", title: "Browse all projects", description: "Choose a project and task"},
+		pickerItem{id: "time-off", title: "Time Off", description: "Vacation, sick leave, and other leave types"},
+	)
+	m.openPicker(pickerRecentProject, "Choose a recent project", items)
 }
 
 func (m *Model) openEntryPicker(entries []trackedEntry) {
@@ -780,6 +849,38 @@ func (m Model) updatePicker(message tea.Msg, key tea.KeyMsg) (tea.Model, tea.Cmd
 			}
 			m.beginEditEntry(entry)
 			return m, nil
+		case pickerRecentProject:
+			switch selected.id {
+			case "browse-projects":
+				m.draft.kind = projectEntry
+				m.openJobPicker()
+				return m, nil
+			case "time-off":
+				m.draft.kind = timeOffEntry
+				m.openTimeOffPicker()
+				return m, nil
+			}
+			ids := strings.Split(strings.TrimPrefix(selected.id, "recent:"), "\x00")
+			if len(ids) != 2 {
+				return m, nil
+			}
+			job := m.jobByID(ids[0])
+			if job.ID == "" {
+				m.status = "That recent project is no longer available."
+				m.openRecentProjectPicker(nil)
+				return m, nil
+			}
+			client := m.clientByID(job.ClientID)
+			task := m.taskByID(ids[1])
+			m.draft = draft{
+				kind: projectEntry, date: m.draft.date,
+				clientID: client.ID, clientName: firstDisplayValue(client.Label(), "—"),
+				jobID: job.ID, jobName: firstDisplayValue(job.Label(), job.ID),
+				taskID: ids[1], taskName: firstDisplayValue(task.Label(), ids[1]),
+				returnDashboard: true,
+			}
+			m.openForm()
+			return m, nil
 		}
 	}
 	var cmd tea.Cmd
@@ -794,6 +895,8 @@ func (m *Model) backFromPicker() {
 		m.openCategoryPicker()
 	case pickerTask:
 		m.openJobPicker()
+	case pickerRecentProject:
+		m.screen = screenDashboard
 	default:
 		m.screen = screenDashboard
 	}
@@ -1952,6 +2055,15 @@ func loadTasksCmd(api *clicktime.Client, jobID string) tea.Cmd {
 			return operationErrorMsg{op: "load tasks", err: err}
 		}
 		return tasksMsg{tasks: tasks}
+	}
+}
+
+func loadRecentProjectsCmd(api *clicktime.Client, date time.Time) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		entries, err := api.TimeEntries(ctx, date.AddDate(0, 0, -28), date)
+		return recentProjectsMsg{entries: entries, err: err}
 	}
 }
 
