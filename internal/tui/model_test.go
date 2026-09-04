@@ -173,6 +173,42 @@ func TestNewEntryCategoryFlow(t *testing.T) {
 	}
 }
 
+func TestRecentProjectsPickerUsesLatestProjectTaskCombinations(t *testing.T) {
+	t.Parallel()
+	date := time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return date })
+	model.draft = draft{date: date.Format(time.DateOnly)}
+	model.clients = []clicktime.ClientResource{{ID: "client-1", Name: "Space"}}
+	model.jobs = []clicktime.Job{{ID: "job-1", ClientID: "client-1", Name: "Apollo"}, {ID: "job-2", ClientID: "client-1", Name: "Gemini"}}
+	model.tasks = []clicktime.Task{{ID: "task-1", Name: "Labor"}, {ID: "task-2", Name: "Review"}}
+	model.openRecentProjectPicker([]clicktime.TimeEntry{
+		{Date: "2026-07-03", JobID: "job-1", TaskID: "task-1"},
+		{Date: "2026-07-28", JobID: "job-1", TaskID: "task-1"},
+		{Date: "2026-07-27", JobID: "job-2", TaskID: "task-2"},
+		{Date: "2026-07-29", JobID: "inactive", TaskID: "task-1"},
+	})
+
+	items := model.picker.Items()
+	if model.pickerKind != pickerRecentProject || len(items) != 4 {
+		t.Fatalf("recent picker = kind %v, items %#v", model.pickerKind, items)
+	}
+	first := items[0].(pickerItem)
+	if first.id != "recent:job-1\x00task-1" || first.title != "Apollo" || !strings.Contains(first.description, "used Jul 28") {
+		t.Fatalf("first recent item = %#v", first)
+	}
+	second := items[1].(pickerItem)
+	if second.id != "recent:job-2\x00task-2" || !strings.Contains(second.description, "used Jul 27") {
+		t.Fatalf("second recent item = %#v", second)
+	}
+
+	model.picker.Select(0)
+	updated, _ := model.updatePicker(tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyEnter})
+	form := updated.(Model)
+	if form.screen != screenForm || form.draft.jobID != "job-1" || form.draft.taskID != "task-1" || !form.draft.returnDashboard {
+		t.Fatalf("recent selection draft = %#v, screen = %v", form.draft, form.screen)
+	}
+}
+
 func TestProjectEntryEscapeMovesBackOnePage(t *testing.T) {
 	t.Parallel()
 	date := time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
