@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -221,9 +222,11 @@ type Model struct {
 	timesheets     []clicktime.Timesheet
 
 	weekStart                time.Time
+	pendingWeek              time.Time
 	cursor                   int
 	dayCursor                int
 	status                   string
+	refreshing               bool
 	quicktimeFailure         bool
 	lastError                error
 	pendingDeleteEntries     []trackedEntry
@@ -289,6 +292,9 @@ func (m Model) withSpinner(cmd tea.Cmd) tea.Cmd {
 }
 
 func (m Model) spinnerActive() bool {
+	if m.refreshing {
+		return true
+	}
 	switch m.screen {
 	case screenLoading, screenTaskLoading, screenSaving, screenTimesheetLoading, screenTimesheetSubmitting:
 		return true
@@ -323,16 +329,28 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		m.dayCursor = dayIndexInWeek(m.now(), msg.week)
 		m.screen = screenDashboard
+		m.refreshing = false
+		m.pendingWeek = time.Time{}
+		m.loadingText = ""
 		m.lastError = nil
 		return m, nil
 	case entriesMsg:
-		if sameDay(msg.week, m.weekStart) {
-			m.entries = sortedEntries(msg.entries)
-			m.timeOffEntries = sortedTimeOffEntries(msg.timeOffEntries)
-			m.timesheets = append([]clicktime.Timesheet(nil), msg.timesheets...)
-			m.cursor = min(m.cursor, max(0, len(m.timesheetRows())-1))
+		expectedWeek := m.weekStart
+		if !m.pendingWeek.IsZero() {
+			expectedWeek = m.pendingWeek
 		}
+		if !sameDay(msg.week, expectedWeek) {
+			return m, nil
+		}
+		m.entries = sortedEntries(msg.entries)
+		m.timeOffEntries = sortedTimeOffEntries(msg.timeOffEntries)
+		m.timesheets = append([]clicktime.Timesheet(nil), msg.timesheets...)
+		m.weekStart = msg.week
+		m.cursor = min(m.cursor, max(0, len(m.timesheetRows())-1))
 		m.screen = screenDashboard
+		m.refreshing = false
+		m.pendingWeek = time.Time{}
+		m.loadingText = ""
 		if m.promptForTimesheetReview && m.isLastWeekdayOfTimesheet(m.promptTimesheetDate) {
 			m.screen = screenTimesheetPrompt
 		}
@@ -378,10 +396,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case timesheetSubmittedMsg:
 		m.timesheetToSubmit = msg.timesheet
 		m.status = "Timesheet submitted for approval."
-		m.screen = screenLoading
-		m.loadingText = "Refreshing your week"
-		m.lastError = nil
-		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
+		cmd := m.startWeekRefresh(m.weekStart, "Refreshing your week")
+		return m, cmd
 	case savedMsg:
 		m.quicktimeFailure = false
 		if msg.status != "" {
@@ -402,20 +418,24 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.status = entryLabel + " " + verb + "."
 		}
-		m.screen = screenLoading
-		m.loadingText = "Refreshing your week"
 		m.pendingDeleteEntries = nil
 		m.promptForTimesheetReview = msg.status == ""
 		m.promptTimesheetDate = time.Time{}
 		if m.promptForTimesheetReview {
 			m.promptTimesheetDate, _ = time.Parse(time.DateOnly, m.draft.date)
 		}
-		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
+		cmd := m.startWeekRefresh(m.weekStart, "Refreshing your week")
+		return m, cmd
 	case operationErrorMsg:
 		m.lastError = msg.err
 		switch msg.op {
 		case "initial load":
 			m.screen = screenError
+		case "load week":
+			m.screen = screenDashboard
+			m.refreshing = false
+			m.pendingWeek = time.Time{}
+			m.loadingText = ""
 		case "save time entry":
 			m.screen = screenReview
 		case "delete time entry":
@@ -476,6 +496,16 @@ func (m Model) updateComponent(message tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	rows := m.timesheetRows()
+	if m.refreshing {
+		switch key.String() {
+		case "q":
+			return m, tea.Quit
+		case "up", "k", "down", "j", "left", "h", "right", "l":
+			// Selection remains responsive while fresh data loads.
+		default:
+			return m, nil
+		}
+	}
 	switch key.String() {
 	case "q":
 		return m, tea.Quit
@@ -512,18 +542,13 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if sameDay(start, m.weekStart) {
 			return m, nil
 		}
-		m.weekStart = start
 		m.cursor = 0
-		m.screen = screenLoading
-		m.loadingText = "Loading the current week"
-		m.lastError = nil
-		return m, m.withSpinner(loadEntriesCmd(m.api, start))
+		cmd := m.startWeekRefresh(start, "Loading the current week")
+		return m, cmd
 	case "r":
 		m.clearQuicktimeFailure()
-		m.screen = screenLoading
-		m.loadingText = "Refreshing your week"
-		m.lastError = nil
-		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
+		cmd := m.startWeekRefresh(m.weekStart, "Refreshing your week")
+		return m, cmd
 	case "s":
 		m.clearQuicktimeFailure()
 		return m.beginTimesheetSubmission(m.selectedDate())
@@ -632,12 +657,19 @@ func (m *Model) clearQuicktimeFailure() {
 }
 
 func (m Model) changeWeek(days int) (tea.Model, tea.Cmd) {
-	m.weekStart = m.weekStart.AddDate(0, 0, days)
+	target := m.weekStart.AddDate(0, 0, days)
 	m.cursor = 0
-	m.screen = screenLoading
-	m.loadingText = "Loading week of " + m.weekStart.Format("Jan 2")
+	cmd := m.startWeekRefresh(target, "Loading week of "+target.Format("Jan 2"))
+	return m, cmd
+}
+
+func (m *Model) startWeekRefresh(week time.Time, loadingText string) tea.Cmd {
+	m.screen = screenDashboard
+	m.refreshing = true
+	m.pendingWeek = week
+	m.loadingText = loadingText
 	m.lastError = nil
-	return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
+	return m.withSpinner(loadEntriesCmd(m.api, week))
 }
 
 func (m *Model) beginNewEntry(date time.Time) {
@@ -1273,6 +1305,13 @@ func (m Model) dashboardView() string {
 	body.WriteString(lipgloss.NewStyle().Width(tableWidth).Render(heading))
 	body.WriteString("\n")
 	body.WriteString(subtitleStyle.Render(fmt.Sprintf("%s – %s", m.weekStart.Format("Jan 2"), weekEnd.Format("Jan 2, 2006"))))
+	if m.refreshing {
+		text := m.loadingText
+		if text == "" {
+			text = "Refreshing"
+		}
+		body.WriteString("  " + m.spinner.View() + " " + mutedStyle.Render(text+"…"))
+	}
 	if statusLine := m.timesheetStatusLine(); statusLine != "" {
 		body.WriteString("\n")
 		body.WriteString(statusLine)
@@ -2069,35 +2108,33 @@ func loadAllCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		weekEnd := week.AddDate(0, 0, 6)
-		me, err := api.Me(ctx)
-		if err != nil {
-			return operationErrorMsg{op: "initial load", err: err}
-		}
-		clients, err := api.Clients(ctx)
-		if err != nil {
-			return operationErrorMsg{op: "initial load", err: err}
-		}
-		jobs, err := api.Jobs(ctx)
-		if err != nil {
-			return operationErrorMsg{op: "initial load", err: err}
-		}
-		tasks, err := api.Tasks(ctx)
-		if err != nil {
-			return operationErrorMsg{op: "initial load", err: err}
-		}
-		timeOffTypes, err := api.TimeOffTypes(ctx)
-		if err != nil {
-			return operationErrorMsg{op: "initial load", err: err}
-		}
-		timesheets, err := api.Timesheets(ctx, week, weekEnd)
-		if err != nil {
-			return operationErrorMsg{op: "initial load", err: err}
-		}
-		entries, err := api.TimeEntries(ctx, week, weekEnd)
-		if err != nil {
-			return operationErrorMsg{op: "initial load", err: err}
-		}
-		timeOffEntries, err := api.TimeOff(ctx, week, weekEnd)
+
+		var (
+			me             clicktime.Me
+			clients        []clicktime.ClientResource
+			jobs           []clicktime.Job
+			tasks          []clicktime.Task
+			timeOffTypes   []clicktime.TimeOffType
+			timesheets     []clicktime.Timesheet
+			entries        []clicktime.TimeEntry
+			timeOffEntries []clicktime.TimeOffEntry
+		)
+		err := runConcurrent(ctx,
+			func(ctx context.Context) (err error) { me, err = api.Me(ctx); return err },
+			func(ctx context.Context) (err error) { clients, err = api.Clients(ctx); return err },
+			func(ctx context.Context) (err error) { jobs, err = api.Jobs(ctx); return err },
+			func(ctx context.Context) (err error) { tasks, err = api.Tasks(ctx); return err },
+			func(ctx context.Context) (err error) { timeOffTypes, err = api.TimeOffTypes(ctx); return err },
+			func(ctx context.Context) (err error) {
+				timesheets, err = api.Timesheets(ctx, week, weekEnd)
+				return err
+			},
+			func(ctx context.Context) (err error) { entries, err = api.TimeEntries(ctx, week, weekEnd); return err },
+			func(ctx context.Context) (err error) {
+				timeOffEntries, err = api.TimeOff(ctx, week, weekEnd)
+				return err
+			},
+		)
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
 		}
@@ -2113,20 +2150,53 @@ func loadEntriesCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		weekEnd := week.AddDate(0, 0, 6)
-		timesheets, err := api.Timesheets(ctx, week, weekEnd)
-		if err != nil {
-			return operationErrorMsg{op: "load week", err: err}
-		}
-		entries, err := api.TimeEntries(ctx, week, weekEnd)
-		if err != nil {
-			return operationErrorMsg{op: "load week", err: err}
-		}
-		timeOffEntries, err := api.TimeOff(ctx, week, weekEnd)
+
+		var (
+			timesheets     []clicktime.Timesheet
+			entries        []clicktime.TimeEntry
+			timeOffEntries []clicktime.TimeOffEntry
+		)
+		err := runConcurrent(ctx,
+			func(ctx context.Context) (err error) {
+				timesheets, err = api.Timesheets(ctx, week, weekEnd)
+				return err
+			},
+			func(ctx context.Context) (err error) { entries, err = api.TimeEntries(ctx, week, weekEnd); return err },
+			func(ctx context.Context) (err error) {
+				timeOffEntries, err = api.TimeOff(ctx, week, weekEnd)
+				return err
+			},
+		)
 		if err != nil {
 			return operationErrorMsg{op: "load week", err: err}
 		}
 		return entriesMsg{entries: entries, timeOffEntries: timeOffEntries, timesheets: timesheets, week: week}
 	}
+}
+
+func runConcurrent(ctx context.Context, operations ...func(context.Context) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		waitGroup sync.WaitGroup
+		once      sync.Once
+		firstErr  error
+	)
+	waitGroup.Add(len(operations))
+	for _, operation := range operations {
+		go func() {
+			defer waitGroup.Done()
+			if err := operation(ctx); err != nil {
+				once.Do(func() {
+					firstErr = err
+					cancel()
+				})
+			}
+		}()
+	}
+	waitGroup.Wait()
+	return firstErr
 }
 
 func loadTimesheetForSubmissionCmd(api *clicktime.Client, date time.Time) tea.Cmd {
