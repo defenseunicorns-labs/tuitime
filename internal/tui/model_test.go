@@ -274,6 +274,7 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	week := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
 	base := Model{
 		weekStart: week,
+		now:       func() time.Time { return week },
 		dayCursor: 2,
 		entries: []clicktime.TimeEntry{
 			{ID: "1", Date: "2026-07-29", Hours: 1, JobID: "job-1", TaskID: "task-1"},
@@ -311,12 +312,24 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	}
 	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
 	previous := updated.(Model)
-	if got := previous.weekStart.Format(time.DateOnly); got != "2026-07-20" || previous.screen != screenLoading {
-		t.Fatalf("[ week = %s, screen = %v", got, previous.screen)
+	if got := previous.weekStart.Format(time.DateOnly); got != "2026-07-27" || previous.screen != screenDashboard || !previous.refreshing {
+		t.Fatalf("[ visible week = %s, screen = %v, refreshing = %v", got, previous.screen, previous.refreshing)
+	}
+	if got := previous.pendingWeek.Format(time.DateOnly); got != "2026-07-20" {
+		t.Fatalf("[ pending week = %s, want 2026-07-20", got)
+	}
+	if view := previous.View(); !strings.Contains(view, "Loading week of Jul 20") || !strings.Contains(view, "job-1") {
+		t.Fatalf("refreshing dashboard did not preserve the current week:\n%s", view)
+	}
+	updated, _ = previous.Update(entriesMsg{week: previous.pendingWeek})
+	loaded := updated.(Model)
+	if got := loaded.weekStart.Format(time.DateOnly); got != "2026-07-20" || loaded.refreshing || !loaded.pendingWeek.IsZero() {
+		t.Fatalf("completed refresh week = %s, refreshing = %v, pending = %s", got, loaded.refreshing, loaded.pendingWeek)
 	}
 	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
-	if got := updated.(Model).weekStart.Format(time.DateOnly); got != "2026-08-03" {
-		t.Fatalf("] week = %s, want 2026-08-03", got)
+	next := updated.(Model)
+	if got := next.pendingWeek.Format(time.DateOnly); got != "2026-08-03" || next.weekStart.Format(time.DateOnly) != "2026-07-27" {
+		t.Fatalf("] visible week = %s, pending week = %s", next.weekStart.Format(time.DateOnly), got)
 	}
 }
 
@@ -339,8 +352,8 @@ func TestSpinnerRunsOnlyOnLoadingScreens(t *testing.T) {
 
 	updated, cmd = dashboard.changeWeek(7)
 	loading := updated.(Model)
-	if !loading.spinnerActive() || cmd == nil {
-		t.Fatalf("changeWeek() screen = %v, cmd = %v", loading.screen, cmd)
+	if loading.screen != screenDashboard || !loading.refreshing || !loading.spinnerActive() || cmd == nil {
+		t.Fatalf("changeWeek() screen = %v, refreshing = %v, cmd = %v", loading.screen, loading.refreshing, cmd)
 	}
 	batch, ok := cmd().(tea.BatchMsg)
 	if !ok || len(batch) != 2 {
@@ -358,6 +371,23 @@ func TestSpinnerRunsOnlyOnLoadingScreens(t *testing.T) {
 	}
 	if loading.spinner.View() == before {
 		t.Fatalf("loading spinner did not advance from %q", before)
+	}
+}
+
+func TestWeekRefreshErrorKeepsDashboardVisible(t *testing.T) {
+	t.Parallel()
+
+	week := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return week })
+	model.screen = screenDashboard
+	model.weekStart = week
+
+	updated, _ := model.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	refreshing := updated.(Model)
+	updated, _ = refreshing.Update(operationErrorMsg{op: "load week", err: fmt.Errorf("refresh failed")})
+	dashboard := updated.(Model)
+	if dashboard.screen != screenDashboard || dashboard.refreshing || !dashboard.pendingWeek.IsZero() || dashboard.lastError == nil {
+		t.Fatalf("refresh error screen = %v, refreshing = %v, pending = %s, error = %v", dashboard.screen, dashboard.refreshing, dashboard.pendingWeek, dashboard.lastError)
 	}
 }
 
@@ -453,8 +483,8 @@ func TestTimesheetSubmissionFlow(t *testing.T) {
 	}
 	updated, refreshCmd := submitting.Update(nonSpinnerMessage(t, cmd))
 	dashboardLoading := updated.(Model)
-	if dashboardLoading.screen != screenLoading || dashboardLoading.status != "Timesheet submitted for approval." || refreshCmd == nil {
-		t.Fatalf("submitted screen = %v, status = %q, cmd = %v", dashboardLoading.screen, dashboardLoading.status, refreshCmd)
+	if dashboardLoading.screen != screenDashboard || !dashboardLoading.refreshing || dashboardLoading.status != "Timesheet submitted for approval." || refreshCmd == nil {
+		t.Fatalf("submitted screen = %v, refreshing = %v, status = %q, cmd = %v", dashboardLoading.screen, dashboardLoading.refreshing, dashboardLoading.status, refreshCmd)
 	}
 	if requests != 6 {
 		t.Fatalf("requests = %d, want 6", requests)
@@ -608,8 +638,8 @@ func TestDeleteSelectedCellDeletesAllEntries(t *testing.T) {
 	}
 	updated, refreshCmd := deleting.Update(nonSpinnerMessage(t, cmd))
 	refreshing := updated.(Model)
-	if refreshing.screen != screenLoading || refreshing.status != "Selected cell deleted." || refreshCmd == nil {
-		t.Fatalf("refresh screen = %v, status = %q, cmd = %v", refreshing.screen, refreshing.status, refreshCmd)
+	if refreshing.screen != screenDashboard || !refreshing.refreshing || refreshing.status != "Selected cell deleted." || refreshCmd == nil {
+		t.Fatalf("refresh screen = %v, refreshing = %v, status = %q, cmd = %v", refreshing.screen, refreshing.refreshing, refreshing.status, refreshCmd)
 	}
 	if !deleted["entry-1"] || !deleted["entry-2"] {
 		t.Fatalf("deleted entries = %#v", deleted)
@@ -650,8 +680,8 @@ func TestQuicktimeCreatesWholeHourEntryInEmptyProjectCell(t *testing.T) {
 		t.Fatalf("quicktime draft = %#v", saving.draft)
 	}
 	updated, _ = saving.Update(nonSpinnerMessage(t, cmd))
-	if refreshed := updated.(Model); refreshed.screen != screenLoading {
-		t.Fatalf("saved quicktime screen = %v, want refresh", refreshed.screen)
+	if refreshed := updated.(Model); refreshed.screen != screenDashboard || !refreshed.refreshing {
+		t.Fatalf("saved quicktime screen = %v, refreshing = %v", refreshed.screen, refreshed.refreshing)
 	}
 	if saved.Date != "2026-07-28" || saved.Hours != 7 || saved.JobID != "job-1" || saved.TaskID != "task-1" || saved.Comment != "" {
 		t.Fatalf("quicktime request = %#v", saved)
@@ -861,6 +891,78 @@ func TestLoadEntriesIncludesTimesheets(t *testing.T) {
 	if len(loaded.timesheets) != 1 || loaded.timesheets[0].EndDate != "2026-07-16" {
 		t.Fatalf("loadEntriesCmd() timesheets = %#v", loaded.timesheets)
 	}
+}
+
+func TestLoadAllStartsIndependentRequestsConcurrently(t *testing.T) {
+	t.Parallel()
+
+	week := time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC)
+	message := runBlockedLoad(t, 8, func(client *clicktime.Client) tea.Cmd {
+		return loadAllCmd(client, week)
+	})
+	if _, ok := message.(allDataMsg); !ok {
+		t.Fatalf("loadAllCmd() = %#v, want allDataMsg", message)
+	}
+}
+
+func TestLoadEntriesStartsIndependentRequestsConcurrently(t *testing.T) {
+	t.Parallel()
+
+	week := time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC)
+	message := runBlockedLoad(t, 3, func(client *clicktime.Client) tea.Cmd {
+		return loadEntriesCmd(client, week)
+	})
+	if _, ok := message.(entriesMsg); !ok {
+		t.Fatalf("loadEntriesCmd() = %#v, want entriesMsg", message)
+	}
+}
+
+func runBlockedLoad(t *testing.T, requestCount int, command func(*clicktime.Client) tea.Cmd) tea.Msg {
+	t.Helper()
+
+	started := make(chan struct{}, requestCount)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/Me" {
+			_, _ = w.Write([]byte(`{"data":{"ID":"me-1"},"errors":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[],"errors":[]}`))
+	}))
+	defer server.Close()
+
+	done := make(chan tea.Msg, 1)
+	client := clicktime.NewWithBaseURL("secret", server.URL, server.Client())
+	go func() {
+		done <- command(client)()
+	}()
+
+	allStarted := true
+	for index := 0; index < requestCount; index++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			allStarted = false
+		}
+		if !allStarted {
+			break
+		}
+	}
+	close(release)
+
+	var message tea.Msg
+	select {
+	case message = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("load command did not finish after releasing requests")
+	}
+	if !allStarted {
+		t.Fatalf("fewer than %d requests started before the first response was released", requestCount)
+	}
+	return message
 }
 
 func TestDashboardShowsTimesheetPeriodStatuses(t *testing.T) {
