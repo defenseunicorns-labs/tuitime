@@ -616,6 +616,80 @@ func TestDeleteSelectedCellDeletesAllEntries(t *testing.T) {
 	}
 }
 
+func TestQuicktimeCreatesWholeHourEntryInEmptyProjectCell(t *testing.T) {
+	t.Parallel()
+	var saved clicktime.TimeEntryInput
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/Me/TimeEntries" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&saved); err != nil {
+			t.Errorf("decode quicktime request: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"data":{"ID":"entry-2"},"errors":[]}`))
+	}))
+	defer server.Close()
+
+	week := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model := NewAt(clicktime.NewWithBaseURL("secret", server.URL, server.Client()), func() time.Time { return week })
+	model.screen = screenDashboard
+	model.weekStart = week
+	model.dayCursor = 1 // Tue, while the existing charge code has time only on Mon.
+	model.clients = []clicktime.ClientResource{{ID: "client-1", Name: "Space"}}
+	model.jobs = []clicktime.Job{{ID: "job-1", ClientID: "client-1", Name: "Apollo"}}
+	model.tasks = []clicktime.Task{{ID: "task-1", Name: "Labor"}}
+	model.entries = []clicktime.TimeEntry{{ID: "entry-1", Date: "2026-07-27", Hours: 2, JobID: "job-1", TaskID: "task-1", Comment: "Existing"}}
+
+	updated, cmd := model.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'7'}})
+	saving := updated.(Model)
+	if saving.screen != screenSaving || saving.loadingText != "Adding quicktime" || cmd == nil {
+		t.Fatalf("quicktime screen = %v, loading = %q, cmd = %v", saving.screen, saving.loadingText, cmd)
+	}
+	if saving.draft.hours != 7 || saving.draft.comment != "" || saving.draft.date != "2026-07-28" {
+		t.Fatalf("quicktime draft = %#v", saving.draft)
+	}
+	updated, _ = saving.Update(nonSpinnerMessage(t, cmd))
+	if refreshed := updated.(Model); refreshed.screen != screenLoading {
+		t.Fatalf("saved quicktime screen = %v, want refresh", refreshed.screen)
+	}
+	if saved.Date != "2026-07-28" || saved.Hours != 7 || saved.JobID != "job-1" || saved.TaskID != "task-1" || saved.Comment != "" {
+		t.Fatalf("quicktime request = %#v", saved)
+	}
+}
+
+func TestQuicktimeOnlyRejectsNoTimeEntriesRowAndShowsFractionalNotice(t *testing.T) {
+	t.Parallel()
+	week := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	filled := Model{
+		screen: screenDashboard, weekStart: week,
+		entries: []clicktime.TimeEntry{{ID: "entry-1", Date: "2026-07-27", Hours: 2, JobID: "job-1", TaskID: "task-1", Comment: "Keep this note"}},
+	}
+	updated, cmd := filled.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	if saving := updated.(Model); saving.screen != screenSaving || cmd == nil {
+		t.Fatalf("filled-cell quicktime = screen %v, cmd = %v", saving.screen, cmd)
+	} else if saving.draft.entryID != "entry-1" || saving.draft.hours != 3 || saving.draft.comment != "Keep this note" {
+		t.Fatalf("filled-cell quicktime draft = %#v", saving.draft)
+	}
+
+	model := Model{screen: screenDashboard, weekStart: week}
+	updated, _ = model.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	rejected := updated.(Model)
+	if rejected.screen != screenDashboard || rejected.status != "Quicktime needs an existing row. Press n to add one." {
+		t.Fatalf("empty-table quicktime = screen %v, status %q", rejected.screen, rejected.status)
+	}
+	updated, _ = rejected.updateDashboard(tea.KeyMsg{Type: tea.KeyRight})
+	if navigated := updated.(Model); navigated.status != "" || navigated.quicktimeFailure {
+		t.Fatalf("quicktime failure survived navigation: status %q, flagged %v", navigated.status, navigated.quicktimeFailure)
+	}
+
+	updated, _ = model.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'.'}})
+	notice := updated.(Model)
+	if notice.screen != screenDashboard || notice.status != "Fractional hours can only be added by editing the cell." {
+		t.Fatalf("fractional status = screen %v, status %q", notice.screen, notice.status)
+	}
+}
+
 func TestEntryFormDateIsReadOnly(t *testing.T) {
 	t.Parallel()
 	model := NewAt(nil, func() time.Time {

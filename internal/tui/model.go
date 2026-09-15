@@ -81,6 +81,7 @@ type draft struct {
 	timeOffTypeName string
 	entryID         string
 	returnDashboard bool
+	quicktime       bool
 }
 
 type trackedEntry struct {
@@ -223,6 +224,7 @@ type Model struct {
 	cursor                   int
 	dayCursor                int
 	status                   string
+	quicktimeFailure         bool
 	lastError                error
 	pendingDeleteEntries     []trackedEntry
 	timesheetToSubmit        clicktime.Timesheet
@@ -381,8 +383,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastError = nil
 		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
 	case savedMsg:
+		m.quicktimeFailure = false
 		if msg.status != "" {
 			m.status = msg.status
+		} else if m.draft.quicktime {
+			m.status = "Quicktime added."
+			if m.draft.entryID != "" {
+				m.status = "Quicktime updated."
+			}
 		} else {
 			verb := "created"
 			if m.draft.entryID != "" {
@@ -472,26 +480,33 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q":
 		return m, tea.Quit
 	case "up", "k":
+		m.clearQuicktimeFailure()
 		if m.cursor > 0 {
 			m.cursor--
 		}
 	case "down", "j":
+		m.clearQuicktimeFailure()
 		if m.cursor < len(rows)-1 {
 			m.cursor++
 		}
 	case "left", "h":
+		m.clearQuicktimeFailure()
 		if m.dayCursor > 0 {
 			m.dayCursor--
 		}
 	case "right", "l":
+		m.clearQuicktimeFailure()
 		if m.dayCursor < 6 {
 			m.dayCursor++
 		}
 	case "[", "pgup", "shift+left":
+		m.clearQuicktimeFailure()
 		return m.changeWeek(-7)
 	case "]", "pgdown", "shift+right":
+		m.clearQuicktimeFailure()
 		return m.changeWeek(7)
 	case "t":
+		m.clearQuicktimeFailure()
 		start := startOfWeek(m.now())
 		m.dayCursor = dayIndexInWeek(m.now(), start)
 		if sameDay(start, m.weekStart) {
@@ -504,13 +519,23 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.lastError = nil
 		return m, m.withSpinner(loadEntriesCmd(m.api, start))
 	case "r":
+		m.clearQuicktimeFailure()
 		m.screen = screenLoading
 		m.loadingText = "Refreshing your week"
 		m.lastError = nil
 		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
 	case "s":
+		m.clearQuicktimeFailure()
 		return m.beginTimesheetSubmission(m.selectedDate())
+	case ".":
+		m.clearQuicktimeFailure()
+		m.status = "Fractional hours can only be added by editing the cell."
+		m.lastError = nil
+		return m, nil
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		return m.beginQuicktime(rows, key.String())
 	case "n":
+		m.clearQuicktimeFailure()
 		date := m.selectedDate()
 		m.status = ""
 		m.lastError = nil
@@ -520,6 +545,7 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loadingText = "Finding recently used projects"
 		return m, m.withSpinner(loadRecentProjectsCmd(m.api, date))
 	case "e", "enter":
+		m.clearQuicktimeFailure()
 		entries := m.selectedEntries()
 		switch len(entries) {
 		case 0:
@@ -538,6 +564,7 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.openEntryPicker(entries)
 		}
 	case "d":
+		m.clearQuicktimeFailure()
 		entries := m.selectedEntries()
 		if len(entries) == 0 {
 			m.status = "There are no entries in that cell to delete."
@@ -555,6 +582,53 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.lastError = nil
 	}
 	return m, nil
+}
+
+func (m Model) beginQuicktime(rows []timesheetRow, hours string) (tea.Model, tea.Cmd) {
+	if m.cursor < 0 || m.cursor >= len(rows) || m.dayCursor < 0 || m.dayCursor > 6 {
+		m.status = "Quicktime needs an existing row. Press n to add one."
+		m.quicktimeFailure = true
+		return m, nil
+	}
+	row := rows[m.cursor]
+	quickHours, _ := strconv.ParseFloat(hours, 64)
+	m.draft = draft{kind: row.kind, date: m.selectedDate().Format(time.DateOnly), hours: quickHours, returnDashboard: true, quicktime: true}
+	entries := row.entries[m.dayCursor]
+	if len(entries) > 1 {
+		m.status = "Quicktime cannot replace a cell with multiple entries. Press e to edit it."
+		m.quicktimeFailure = true
+		return m, nil
+	}
+	if len(entries) == 1 {
+		entry := entries[0]
+		if entry.entryID() == "" {
+			m.status = "ClickTime did not return an ID for that entry, so it cannot be updated."
+			m.quicktimeFailure = true
+			return m, nil
+		}
+		m.draft.entryID = entry.entryID()
+		m.draft.comment = entry.comment()
+	}
+	if row.kind == timeOffEntry {
+		m.draft.timeOffTypeID = row.taskID
+	} else {
+		m.draft.clientID = m.jobByID(row.jobID).ClientID
+		m.draft.jobID = row.jobID
+		m.draft.taskID = row.taskID
+	}
+	m.status = ""
+	m.quicktimeFailure = false
+	m.lastError = nil
+	m.screen = screenSaving
+	m.loadingText = "Adding quicktime"
+	return m, m.withSpinner(saveEntryCmd(m.api, m.draft))
+}
+
+func (m *Model) clearQuicktimeFailure() {
+	if m.quicktimeFailure {
+		m.status = ""
+		m.quicktimeFailure = false
+	}
 }
 
 func (m Model) changeWeek(days int) (tea.Model, tea.Cmd) {
@@ -1214,7 +1288,7 @@ func (m Model) dashboardView() string {
 		body.WriteString("\n\n" + errorStyle.Render(m.lastError.Error()))
 	}
 	body.WriteString("\n\n")
-	body.WriteString(helpStyle.Render("hl/←→ day  jk/↑↓ row  [] week  n new  e edit  d delete  s submit  t today  r refresh  q quit"))
+	body.WriteString(helpStyle.Render("hl/←→ day  jk/↑↓ row  1-9 quicktime  [] week  n new  e edit  d delete  s submit  t today  r refresh  q quit"))
 	body.WriteString("\n\n")
 	body.WriteString(mutedStyle.Render("* today | + timesheet end | ※ today and timesheet end"))
 	return m.appFrame(body.String())
@@ -1857,6 +1931,9 @@ func (m Model) selectedCellDetail(rows []timesheetRow) string {
 	entries := row.entries[m.dayCursor]
 	prefix := activeLabelStyle.Render(date) + "  " + row.project + " / " + row.task
 	if len(entries) == 0 {
+		if row.kind == projectEntry {
+			return detailStyle.Width(m.timesheetTableWidth()).Render(prefix + mutedStyle.Render("  No entry — press 1–9 for quicktime or e to add here"))
+		}
 		return detailStyle.Width(m.timesheetTableWidth()).Render(prefix + mutedStyle.Render("  No entry — press e to add here"))
 	}
 	if len(entries) == 1 {
