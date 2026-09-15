@@ -32,6 +32,7 @@ const (
 	screenSaving
 	screenDeleteReview
 	screenTimesheetLoading
+	screenTimesheetPrompt
 	screenTimesheetReview
 	screenTimesheetSubmitting
 	screenError
@@ -218,16 +219,18 @@ type Model struct {
 	timeOffEntries []clicktime.TimeOffEntry
 	timesheets     []clicktime.Timesheet
 
-	weekStart            time.Time
-	cursor               int
-	dayCursor            int
-	status               string
-	lastError            error
-	pendingDeleteEntries []trackedEntry
-	timesheetToSubmit    clicktime.Timesheet
-	submissionEntries    []clicktime.TimeEntry
-	submissionTimeOff    []clicktime.TimeOffEntry
-	attestationStatement string
+	weekStart                time.Time
+	cursor                   int
+	dayCursor                int
+	status                   string
+	lastError                error
+	pendingDeleteEntries     []trackedEntry
+	timesheetToSubmit        clicktime.Timesheet
+	submissionEntries        []clicktime.TimeEntry
+	submissionTimeOff        []clicktime.TimeOffEntry
+	attestationStatement     string
+	promptForTimesheetReview bool
+	promptTimesheetDate      time.Time
 
 	picker         list.Model
 	pickerKind     pickerKind
@@ -328,6 +331,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = min(m.cursor, max(0, len(m.timesheetRows())-1))
 		}
 		m.screen = screenDashboard
+		if m.promptForTimesheetReview && m.isLastWeekdayOfTimesheet(m.promptTimesheetDate) {
+			m.screen = screenTimesheetPrompt
+		}
+		m.promptForTimesheetReview = false
 		m.lastError = nil
 		return m, nil
 	case tasksMsg:
@@ -390,6 +397,11 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenLoading
 		m.loadingText = "Refreshing your week"
 		m.pendingDeleteEntries = nil
+		m.promptForTimesheetReview = msg.status == ""
+		m.promptTimesheetDate = time.Time{}
+		if m.promptForTimesheetReview {
+			m.promptTimesheetDate, _ = time.Parse(time.DateOnly, m.draft.date)
+		}
 		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
 	case operationErrorMsg:
 		m.lastError = msg.err
@@ -429,6 +441,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateDeleteReview(key)
 	case screenTimesheetReview:
 		return m.updateTimesheetReview(key)
+	case screenTimesheetPrompt:
+		return m.updateTimesheetPrompt(key)
 	case screenError:
 		switch key.String() {
 		case "q":
@@ -495,16 +509,7 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.lastError = nil
 		return m, m.withSpinner(loadEntriesCmd(m.api, m.weekStart))
 	case "s":
-		date := m.selectedDate()
-		m.screen = screenTimesheetLoading
-		m.loadingText = "Loading timesheet for " + date.Format("Jan 2")
-		m.status = ""
-		m.lastError = nil
-		m.timesheetToSubmit = clicktime.Timesheet{}
-		m.submissionEntries = nil
-		m.submissionTimeOff = nil
-		m.attestationStatement = ""
-		return m, m.withSpinner(loadTimesheetForSubmissionCmd(m.api, date))
+		return m.beginTimesheetSubmission(m.selectedDate())
 	case "n":
 		date := m.selectedDate()
 		m.status = ""
@@ -1038,6 +1043,28 @@ func (m Model) updateTimesheetReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) updateTimesheetPrompt(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "y", "enter":
+		return m.beginTimesheetSubmission(m.promptTimesheetDate)
+	case "n", "b", "esc":
+		m.screen = screenDashboard
+	}
+	return m, nil
+}
+
+func (m Model) beginTimesheetSubmission(date time.Time) (tea.Model, tea.Cmd) {
+	m.screen = screenTimesheetLoading
+	m.loadingText = "Loading timesheet for " + date.Format("Jan 2")
+	m.status = ""
+	m.lastError = nil
+	m.timesheetToSubmit = clicktime.Timesheet{}
+	m.submissionEntries = nil
+	m.submissionTimeOff = nil
+	m.attestationStatement = ""
+	return m, m.withSpinner(loadTimesheetForSubmissionCmd(m.api, date))
+}
+
 func (m *Model) setFormFocus(index int) {
 	m.blurForm()
 	m.formFocus = index
@@ -1076,6 +1103,8 @@ func (m Model) View() string {
 		return m.deleteReviewView()
 	case screenTimesheetReview:
 		return m.timesheetReviewView()
+	case screenTimesheetPrompt:
+		return m.timesheetPromptView()
 	case screenError:
 		return m.errorView()
 	default:
@@ -1310,6 +1339,15 @@ func (m Model) deleteEntrySummary(entry trackedEntry) string {
 	return summary
 }
 
+func (m Model) timesheetPromptView() string {
+	var body strings.Builder
+	body.WriteString(titleStyle.Render("Last weekday of the pay period") + "\n\n")
+	body.WriteString("You saved time for " + detailStyle.Render(displayDate(m.promptTimesheetDate.Format(time.DateOnly))) + ".\n")
+	body.WriteString("Would you like to review your timesheet for submission now?")
+	body.WriteString("\n\n" + helpStyle.Render("y enter review timesheet  n b esc stay on weekly view"))
+	return m.appFrame(body.String())
+}
+
 func firstDisplayValue(values ...string) string {
 	for _, value := range values {
 		if value = strings.TrimSpace(value); value != "" {
@@ -1475,6 +1513,27 @@ func (m Model) dayHeader(date time.Time) string {
 func (m Model) isTimesheetEnd(date time.Time) bool {
 	for _, timesheet := range m.timesheets {
 		if dateString(timesheet.EndDate) == date.Format(time.DateOnly) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLastWeekdayOfTimesheet reports whether date is the final Monday-through-Friday
+// day in one of the loaded ClickTime periods. Periods commonly end on a weekend.
+func (m Model) isLastWeekdayOfTimesheet(date time.Time) bool {
+	if date.IsZero() {
+		return false
+	}
+	for _, timesheet := range m.timesheets {
+		end, err := time.Parse(time.DateOnly, dateString(timesheet.EndDate))
+		if err != nil {
+			continue
+		}
+		for end.Weekday() == time.Saturday || end.Weekday() == time.Sunday {
+			end = end.AddDate(0, 0, -1)
+		}
+		if sameDay(end, date) {
 			return true
 		}
 	}

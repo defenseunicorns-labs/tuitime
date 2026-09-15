@@ -835,6 +835,56 @@ func TestTimesheetContainsDateUsesCalendarDate(t *testing.T) {
 	}
 }
 
+func TestSaveOnLastPayPeriodWeekdayOffersTimesheetReview(t *testing.T) {
+	t.Parallel()
+	date := time.Date(2026, time.July, 31, 0, 0, 0, 0, time.UTC) // Friday
+	model := NewAt(nil, func() time.Time { return date })
+	model.weekStart = startOfWeek(date)
+	model.draft = draft{date: date.Format(time.DateOnly)}
+
+	updated, _ := model.Update(savedMsg{})
+	refreshing := updated.(Model)
+	if !refreshing.promptForTimesheetReview {
+		t.Fatal("saving an entry should mark the refresh for a possible timesheet prompt")
+	}
+	updated, _ = refreshing.Update(entriesMsg{
+		week:       refreshing.weekStart,
+		timesheets: []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-08-02"}}, // Sunday
+	})
+	prompt := updated.(Model)
+	if prompt.screen != screenTimesheetPrompt {
+		t.Fatalf("screen = %v, want timesheet prompt", prompt.screen)
+	}
+	if view := prompt.View(); !strings.Contains(view, "Would you like to review your timesheet for submission now?") {
+		t.Fatalf("timesheet prompt is missing its question:\n%s", view)
+	}
+
+	updated, cmd := prompt.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	loading := updated.(Model)
+	if loading.screen != screenTimesheetLoading || cmd == nil {
+		t.Fatalf("accepting prompt: screen = %v, cmd = %v", loading.screen, cmd)
+	}
+
+	updated, _ = prompt.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if declined := updated.(Model); declined.screen != screenDashboard {
+		t.Fatalf("declining prompt: screen = %v, want dashboard", declined.screen)
+	}
+}
+
+func TestTimesheetReviewPromptOnlyUsesFinalWeekday(t *testing.T) {
+	t.Parallel()
+	model := Model{timesheets: []clicktime.Timesheet{{EndDate: "2026-08-02"}}}
+	if !model.isLastWeekdayOfTimesheet(time.Date(2026, time.July, 31, 0, 0, 0, 0, time.UTC)) {
+		t.Fatal("Friday before a Sunday period end should be the final weekday")
+	}
+	if model.isLastWeekdayOfTimesheet(time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)) {
+		t.Fatal("a weekend period end should not trigger the prompt")
+	}
+	if model.isLastWeekdayOfTimesheet(time.Date(2026, time.July, 30, 0, 0, 0, 0, time.UTC)) {
+		t.Fatal("a weekday before the final weekday should not trigger the prompt")
+	}
+}
+
 func TestTimesheetStatusPresentation(t *testing.T) {
 	t.Parallel()
 
