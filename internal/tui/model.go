@@ -136,6 +136,7 @@ func totalTrackedHours(entries []trackedEntry) float64 {
 
 type timesheetRow struct {
 	kind    entryKind
+	locked  bool
 	jobID   string
 	taskID  string
 	project string
@@ -153,22 +154,24 @@ type submissionChargeCode struct {
 }
 
 type allDataMsg struct {
-	me             clicktime.Me
-	clients        []clicktime.ClientResource
-	jobs           []clicktime.Job
-	tasks          []clicktime.Task
-	timeOffTypes   []clicktime.TimeOffType
-	entries        []clicktime.TimeEntry
-	timeOffEntries []clicktime.TimeOffEntry
-	timesheets     []clicktime.Timesheet
-	week           time.Time
+	me                        clicktime.Me
+	clients                   []clicktime.ClientResource
+	jobs                      []clicktime.Job
+	tasks                     []clicktime.Task
+	timeOffTypes              []clicktime.TimeOffType
+	entries                   []clicktime.TimeEntry
+	timeOffEntries            []clicktime.TimeOffEntry
+	alternativeTimeOffEntries []clicktime.AlternativeTimeOffEntry
+	timesheets                []clicktime.Timesheet
+	week                      time.Time
 }
 
 type entriesMsg struct {
-	entries        []clicktime.TimeEntry
-	timeOffEntries []clicktime.TimeOffEntry
-	timesheets     []clicktime.Timesheet
-	week           time.Time
+	entries                   []clicktime.TimeEntry
+	timeOffEntries            []clicktime.TimeOffEntry
+	alternativeTimeOffEntries []clicktime.AlternativeTimeOffEntry
+	timesheets                []clicktime.Timesheet
+	week                      time.Time
 }
 
 type tasksMsg struct {
@@ -212,14 +215,15 @@ type Model struct {
 	loadingText string
 	spinner     spinner.Model
 
-	me             clicktime.Me
-	clients        []clicktime.ClientResource
-	jobs           []clicktime.Job
-	tasks          []clicktime.Task
-	timeOffTypes   []clicktime.TimeOffType
-	entries        []clicktime.TimeEntry
-	timeOffEntries []clicktime.TimeOffEntry
-	timesheets     []clicktime.Timesheet
+	me                        clicktime.Me
+	clients                   []clicktime.ClientResource
+	jobs                      []clicktime.Job
+	tasks                     []clicktime.Task
+	timeOffTypes              []clicktime.TimeOffType
+	entries                   []clicktime.TimeEntry
+	timeOffEntries            []clicktime.TimeOffEntry
+	alternativeTimeOffEntries []clicktime.AlternativeTimeOffEntry
+	timesheets                []clicktime.Timesheet
 
 	weekStart                time.Time
 	pendingWeek              time.Time
@@ -324,6 +328,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.timeOffTypes = msg.timeOffTypes
 		m.entries = sortedEntries(msg.entries)
 		m.timeOffEntries = sortedTimeOffEntries(msg.timeOffEntries)
+		m.alternativeTimeOffEntries = msg.alternativeTimeOffEntries
 		m.timesheets = append([]clicktime.Timesheet(nil), msg.timesheets...)
 		m.weekStart = msg.week
 		m.cursor = 0
@@ -344,6 +349,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.entries = sortedEntries(msg.entries)
 		m.timeOffEntries = sortedTimeOffEntries(msg.timeOffEntries)
+		m.alternativeTimeOffEntries = msg.alternativeTimeOffEntries
 		m.timesheets = append([]clicktime.Timesheet(nil), msg.timesheets...)
 		m.weekStart = msg.week
 		m.cursor = min(m.cursor, max(0, len(m.timesheetRows())-1))
@@ -571,6 +577,10 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.withSpinner(loadRecentProjectsCmd(m.api, date))
 	case "e", "enter":
 		m.clearQuicktimeFailure()
+		if m.cursor >= 0 && m.cursor < len(rows) && rows[m.cursor].locked {
+			m.status = "Company Holiday entries are locked by ClickTime."
+			return m, nil
+		}
 		entries := m.selectedEntries()
 		switch len(entries) {
 		case 0:
@@ -616,6 +626,10 @@ func (m Model) beginQuicktime(rows []timesheetRow, hours string) (tea.Model, tea
 		return m, nil
 	}
 	row := rows[m.cursor]
+	if row.locked {
+		m.status = "Company Holiday entries are locked by ClickTime."
+		return m, nil
+	}
 	quickHours, _ := strconv.ParseFloat(hours, 64)
 	m.draft = draft{kind: row.kind, date: m.selectedDate().Format(time.DateOnly), hours: quickHours, returnDashboard: true, quicktime: true}
 	entries := row.entries[m.dayCursor]
@@ -1586,6 +1600,20 @@ func (m Model) timesheetRows() []timesheetRow {
 		row.hours[day] += float64(entry.Hours)
 		row.total += float64(entry.Hours)
 	}
+	for _, entry := range m.alternativeTimeOffEntries {
+		day := dayForDate(entry.Date, m.weekStart)
+		if day < 0 {
+			continue
+		}
+		key := "alternative-timeoff\x00" + entry.Label()
+		row, ok := byKey[key]
+		if !ok {
+			row = &timesheetRow{kind: timeOffEntry, locked: true, project: "Time Off", task: "🔒 " + entry.Label()}
+			byKey[key] = row
+		}
+		row.hours[day] += float64(entry.Hours)
+		row.total += float64(entry.Hours)
+	}
 
 	rows := make([]timesheetRow, 0, len(byKey))
 	for _, row := range byKey {
@@ -1969,6 +1997,9 @@ func (m Model) selectedCellDetail(rows []timesheetRow) string {
 	row := rows[m.cursor]
 	entries := row.entries[m.dayCursor]
 	prefix := activeLabelStyle.Render(date) + "  " + row.project + " / " + row.task
+	if row.locked {
+		return detailStyle.Width(m.timesheetTableWidth()).Render(prefix + mutedStyle.Render("  Locked by ClickTime"))
+	}
 	if len(entries) == 0 {
 		if row.kind == projectEntry {
 			return detailStyle.Width(m.timesheetTableWidth()).Render(prefix + mutedStyle.Render("  No entry — press 1–9 for quicktime or e to add here"))
@@ -2011,6 +2042,10 @@ func hiddenTimeOffType(name string) bool {
 }
 
 func (m Model) totalForDate(date time.Time) float64 {
+	return m.recordedHoursForDate(date) + m.companyHolidayHours(date)
+}
+
+func (m Model) recordedHoursForDate(date time.Time) float64 {
 	var total float64
 	for _, entry := range m.entries {
 		if dateString(entry.Date) == date.Format(time.DateOnly) {
@@ -2023,6 +2058,29 @@ func (m Model) totalForDate(date time.Time) float64 {
 		}
 	}
 	return total
+}
+
+func (m Model) companyHolidayHours(date time.Time) float64 {
+	var total float64
+	for _, entry := range m.alternativeTimeOffEntries {
+		if dateString(entry.Date) == date.Format(time.DateOnly) {
+			total += float64(entry.Hours)
+		}
+	}
+	if total > 0 {
+		return total
+	}
+	for _, timesheet := range m.timesheets {
+		if !timesheetContainsDate(timesheet, date) {
+			continue
+		}
+		for _, day := range timesheet.DayTotals {
+			if dateString(day.Date) == date.Format(time.DateOnly) {
+				return math.Max(0, float64(day.Hours)-m.recordedHoursForDate(date))
+			}
+		}
+	}
+	return 0
 }
 
 func (m Model) weekTotal() float64 {
@@ -2110,14 +2168,15 @@ func loadAllCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		weekEnd := week.AddDate(0, 0, 6)
 
 		var (
-			me             clicktime.Me
-			clients        []clicktime.ClientResource
-			jobs           []clicktime.Job
-			tasks          []clicktime.Task
-			timeOffTypes   []clicktime.TimeOffType
-			timesheets     []clicktime.Timesheet
-			entries        []clicktime.TimeEntry
-			timeOffEntries []clicktime.TimeOffEntry
+			me                        clicktime.Me
+			clients                   []clicktime.ClientResource
+			jobs                      []clicktime.Job
+			tasks                     []clicktime.Task
+			timeOffTypes              []clicktime.TimeOffType
+			timesheets                []clicktime.Timesheet
+			entries                   []clicktime.TimeEntry
+			timeOffEntries            []clicktime.TimeOffEntry
+			alternativeTimeOffEntries []clicktime.AlternativeTimeOffEntry
 		)
 		err := runConcurrent(ctx,
 			func(ctx context.Context) (err error) { me, err = api.Me(ctx); return err },
@@ -2134,13 +2193,17 @@ func loadAllCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 				timeOffEntries, err = api.TimeOff(ctx, week, weekEnd)
 				return err
 			},
+			func(ctx context.Context) (err error) {
+				alternativeTimeOffEntries, err = api.AlternativeTimeOff(ctx, week, weekEnd)
+				return err
+			},
 		)
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
 		}
 		return allDataMsg{
 			me: me, clients: clients, jobs: jobs, tasks: tasks, timeOffTypes: timeOffTypes,
-			entries: entries, timeOffEntries: timeOffEntries, timesheets: timesheets, week: week,
+			entries: entries, timeOffEntries: timeOffEntries, alternativeTimeOffEntries: alternativeTimeOffEntries, timesheets: timesheets, week: week,
 		}
 	}
 }
@@ -2152,9 +2215,10 @@ func loadEntriesCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		weekEnd := week.AddDate(0, 0, 6)
 
 		var (
-			timesheets     []clicktime.Timesheet
-			entries        []clicktime.TimeEntry
-			timeOffEntries []clicktime.TimeOffEntry
+			timesheets                []clicktime.Timesheet
+			entries                   []clicktime.TimeEntry
+			timeOffEntries            []clicktime.TimeOffEntry
+			alternativeTimeOffEntries []clicktime.AlternativeTimeOffEntry
 		)
 		err := runConcurrent(ctx,
 			func(ctx context.Context) (err error) {
@@ -2166,11 +2230,15 @@ func loadEntriesCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 				timeOffEntries, err = api.TimeOff(ctx, week, weekEnd)
 				return err
 			},
+			func(ctx context.Context) (err error) {
+				alternativeTimeOffEntries, err = api.AlternativeTimeOff(ctx, week, weekEnd)
+				return err
+			},
 		)
 		if err != nil {
 			return operationErrorMsg{op: "load week", err: err}
 		}
-		return entriesMsg{entries: entries, timeOffEntries: timeOffEntries, timesheets: timesheets, week: week}
+		return entriesMsg{entries: entries, timeOffEntries: timeOffEntries, alternativeTimeOffEntries: alternativeTimeOffEntries, timesheets: timesheets, week: week}
 	}
 }
 
