@@ -63,6 +63,9 @@ var (
 				Padding(0, 1).
 				Foreground(lipgloss.AdaptiveColor{Light: "#334155", Dark: "#CBD5E1"})
 
+	tableWeekendHeaderStyle = tableHeaderStyle.
+				Foreground(lipgloss.AdaptiveColor{Light: "#64748B", Dark: "#94A3B8"})
+
 	tableSelectedHeaderStyle = lipgloss.NewStyle().
 					Bold(true).
 					Padding(0, 1).

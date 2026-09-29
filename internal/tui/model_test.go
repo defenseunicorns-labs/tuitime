@@ -120,6 +120,49 @@ func TestTimesheetRowsShowLockedCompanyHolidayFromDayTotal(t *testing.T) {
 	}
 }
 
+func TestPriorWeekRowsAreEmptyAndEditableWithoutCarryingHoliday(t *testing.T) {
+	t.Parallel()
+	week := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return week })
+	model.jobs = []clicktime.Job{{ID: "job-1", Name: "Apollo"}}
+	model.tasks = []clicktime.Task{{ID: "task-1", Name: "Labor"}}
+	model.timeOffTypes = []clicktime.TimeOffType{{ID: "vacation", Name: "Vacation"}, {ID: "holiday", Name: "Company Holiday"}}
+	model.priorEntries = []clicktime.TimeEntry{
+		{ID: "old-1", Date: "2026-07-20", Hours: 8, JobID: "job-1", TaskID: "task-1"},
+		{ID: "old-2", Date: "2026-07-21", Hours: 4, JobID: "job-1", TaskID: "task-1"},
+	}
+	model.priorTimeOffEntries = []clicktime.TimeOffEntry{
+		{ID: "old-leave", Date: "2026-07-22", Hours: 8, TimeOffTypeID: "vacation"},
+		{ID: "old-holiday", Date: "2026-07-23", Hours: 8, TimeOffTypeID: "holiday"},
+	}
+	rows := model.timesheetRows()
+	if len(rows) != 2 || rows[0].jobID != "job-1" || rows[1].task != "Vacation" {
+		t.Fatalf("prior-week rows = %#v", rows)
+	}
+	for _, row := range rows {
+		if row.locked || row.total != 0 || row.hours != [7]float64{} {
+			t.Fatalf("prior-week row contains hours or entries: %#v", row)
+		}
+		for _, entries := range row.entries {
+			if len(entries) != 0 {
+				t.Fatalf("prior-week row contains an entry: %#v", row)
+			}
+		}
+	}
+	if model.weekTotal() != 0 || len(model.selectedEntries()) != 0 || len(model.submissionEntries) != 0 {
+		t.Fatalf("prior-week time leaked into current week or submission: %#v", model)
+	}
+	model.beginNewEntryForRow(week, rows[0])
+	if model.draft.jobID != "job-1" || model.draft.taskID != "task-1" || model.draft.entryID != "" {
+		t.Fatalf("new entry from prior-week row = %#v", model.draft)
+	}
+	model.entries = []clicktime.TimeEntry{{ID: "new-1", Date: "2026-07-27", Hours: 3, JobID: "job-1", TaskID: "task-1"}}
+	rows = model.timesheetRows()
+	if len(rows) != 2 || rows[0].hours[0] != 3 || rows[0].total != 3 || len(rows[0].entries[0]) != 1 || rows[0].entries[0][0].entryID() != "new-1" {
+		t.Fatalf("current entry did not merge into carried row: %#v", rows)
+	}
+}
+
 func TestNewEntryCategoryFlow(t *testing.T) {
 	t.Parallel()
 	date := time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
@@ -323,6 +366,7 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	if got := updated.(Model).cursor; got != 1 {
 		t.Fatalf("down cursor = %d, want 1", got)
 	}
+	base.cursor = 1
 	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
 	previous := updated.(Model)
 	if got := previous.weekStart.Format(time.DateOnly); got != "2026-07-27" || previous.screen != screenDashboard || !previous.refreshing {
@@ -331,7 +375,10 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	if got := previous.pendingWeek.Format(time.DateOnly); got != "2026-07-20" {
 		t.Fatalf("[ pending week = %s, want 2026-07-20", got)
 	}
-	if view := previous.View(); !strings.Contains(view, "Loading week of Jul 20") || !strings.Contains(view, "job-1") {
+	if previous.dayCursor != 2 || previous.cursor != 1 {
+		t.Fatalf("[ moved selection before new week loaded: row %d, day %d", previous.cursor, previous.dayCursor)
+	}
+	if view := previous.View(); !strings.Contains(view, "Loading week of Jul 20") || !strings.Contains(view, "job-1") || !strings.Contains(view, "Wed, Jul 29") {
 		t.Fatalf("refreshing dashboard did not preserve the current week:\n%s", view)
 	}
 	updated, _ = previous.Update(entriesMsg{week: previous.pendingWeek})
@@ -339,10 +386,21 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	if got := loaded.weekStart.Format(time.DateOnly); got != "2026-07-20" || loaded.refreshing || !loaded.pendingWeek.IsZero() {
 		t.Fatalf("completed refresh week = %s, refreshing = %v, pending = %s", got, loaded.refreshing, loaded.pendingWeek)
 	}
+	if loaded.dayCursor != 4 || loaded.cursor != 0 || !strings.Contains(loaded.View(), "Fri, Jul 24") {
+		t.Fatalf("loaded prior week selection = row %d, day %d; view:\n%s", loaded.cursor, loaded.dayCursor, loaded.View())
+	}
 	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
 	next := updated.(Model)
 	if got := next.pendingWeek.Format(time.DateOnly); got != "2026-08-03" || next.weekStart.Format(time.DateOnly) != "2026-07-27" {
 		t.Fatalf("] visible week = %s, pending week = %s", next.weekStart.Format(time.DateOnly), got)
+	}
+	if next.dayCursor != 2 || next.cursor != 1 || !strings.Contains(next.View(), "Wed, Jul 29") {
+		t.Fatalf("] moved selection before new week loaded: row %d, day %d; view:\n%s", next.cursor, next.dayCursor, next.View())
+	}
+	updated, _ = next.Update(entriesMsg{week: next.pendingWeek})
+	loaded = updated.(Model)
+	if loaded.dayCursor != 0 || loaded.cursor != 0 || !strings.Contains(loaded.View(), "Mon, Aug 3") {
+		t.Fatalf("loaded next week selection = row %d, day %d; view:\n%s", loaded.cursor, loaded.dayCursor, loaded.View())
 	}
 }
 
@@ -401,6 +459,48 @@ func TestWeekRefreshErrorKeepsDashboardVisible(t *testing.T) {
 	dashboard := updated.(Model)
 	if dashboard.screen != screenDashboard || dashboard.refreshing || !dashboard.pendingWeek.IsZero() || dashboard.lastError == nil {
 		t.Fatalf("refresh error screen = %v, refreshing = %v, pending = %s, error = %v", dashboard.screen, dashboard.refreshing, dashboard.pendingWeek, dashboard.lastError)
+	}
+}
+
+func TestWeekNavigationErrorKeepsCurrentSelection(t *testing.T) {
+	t.Parallel()
+
+	week := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return week })
+	model.screen = screenDashboard
+	model.cursor = 1
+	model.dayCursor = 2
+	model.entries = []clicktime.TimeEntry{
+		{Date: "2026-07-27", JobID: "job-1", TaskID: "task-1"},
+		{Date: "2026-07-27", JobID: "job-2", TaskID: "task-2"},
+	}
+
+	updated, _ := model.changeWeek(-7)
+	updated, _ = updated.(Model).Update(operationErrorMsg{op: "load week", err: fmt.Errorf("refresh failed")})
+	dashboard := updated.(Model)
+	if dashboard.cursor != 1 || dashboard.dayCursor != 2 || !sameDay(dashboard.weekStart, week) || dashboard.pendingDayCursor != nil {
+		t.Fatalf("failed week navigation changed selection: row %d, day %d, week %s", dashboard.cursor, dashboard.dayCursor, dashboard.weekStart)
+	}
+}
+
+func TestJumpToTodaySelectsDayWhenWeekLoads(t *testing.T) {
+	t.Parallel()
+
+	today := time.Date(2026, time.August, 5, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return today })
+	model.screen = screenDashboard
+	model.weekStart = time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model.dayCursor = 4
+
+	updated, _ := model.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	loading := updated.(Model)
+	if loading.dayCursor != 4 || !sameDay(loading.weekStart, model.weekStart) {
+		t.Fatalf("today jump moved selection before new week loaded: day %d, week %s", loading.dayCursor, loading.weekStart)
+	}
+	updated, _ = loading.Update(entriesMsg{week: loading.pendingWeek})
+	loaded := updated.(Model)
+	if loaded.dayCursor != 2 || !sameDay(loaded.weekStart, startOfWeek(today)) || !strings.Contains(loaded.View(), "Wed, Aug 5") {
+		t.Fatalf("today jump selected day %d in week %s; view:\n%s", loaded.dayCursor, loaded.weekStart, loaded.View())
 	}
 }
 
@@ -886,7 +986,20 @@ func TestLoadEntriesIncludesTimesheets(t *testing.T) {
 		switch r.URL.Path {
 		case "/Me/Timesheets":
 			_, _ = w.Write([]byte(`{"data":[{"ID":"sheet-1","StartDate":"2026-07-13","EndDate":"2026-07-16"}],"errors":[]}`))
-		case "/Me/TimeEntries", "/Me/TimeOff", "/Me/AlternativeTimeOff":
+		case "/Me/TimeEntries":
+			if r.URL.Query().Get("StartDate") != "2026-07-06" || r.URL.Query().Get("EndDate") != "2026-07-19" {
+				t.Errorf("time entry range = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":[{"ID":"prior","Date":"2026-07-06","JobID":"job-1","TaskID":"task-1","Hours":8},{"ID":"current","Date":"2026-07-13","JobID":"job-2","TaskID":"task-2","Hours":2}],"errors":[]}`))
+		case "/Me/TimeOff":
+			if r.URL.Query().Get("FromDate") != "2026-07-06" || r.URL.Query().Get("ToDate") != "2026-07-19" {
+				t.Errorf("time off range = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":[{"ID":"prior-leave","Date":"2026-07-08","TimeOffTypeID":"vacation","Hours":8},{"ID":"current-leave","Date":"2026-07-14","TimeOffTypeID":"sick","Hours":2}],"errors":[]}`))
+		case "/Me/AlternativeTimeOff":
+			if r.URL.Query().Get("FromDate") != "2026-07-13" {
+				t.Errorf("holiday range = %s", r.URL.RawQuery)
+			}
 			_, _ = w.Write([]byte(`{"data":[],"errors":[]}`))
 		default:
 			http.NotFound(w, r)
@@ -903,6 +1016,12 @@ func TestLoadEntriesIncludesTimesheets(t *testing.T) {
 	}
 	if len(loaded.timesheets) != 1 || loaded.timesheets[0].EndDate != "2026-07-16" {
 		t.Fatalf("loadEntriesCmd() timesheets = %#v", loaded.timesheets)
+	}
+	if len(loaded.priorEntries) != 1 || loaded.priorEntries[0].ID != "prior" || len(loaded.entries) != 1 || loaded.entries[0].ID != "current" {
+		t.Fatalf("loadEntriesCmd() project split = prior %#v, current %#v", loaded.priorEntries, loaded.entries)
+	}
+	if len(loaded.priorTimeOffEntries) != 1 || loaded.priorTimeOffEntries[0].ID != "prior-leave" || len(loaded.timeOffEntries) != 1 || loaded.timeOffEntries[0].ID != "current-leave" {
+		t.Fatalf("loadEntriesCmd() time off split = prior %#v, current %#v", loaded.priorTimeOffEntries, loaded.timeOffEntries)
 	}
 }
 
