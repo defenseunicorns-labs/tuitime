@@ -233,6 +233,7 @@ type Model struct {
 
 	weekStart                time.Time
 	pendingWeek              time.Time
+	pendingDayCursor         *int
 	cursor                   int
 	dayCursor                int
 	status                   string
@@ -361,11 +362,18 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.priorTimeOffEntries = msg.priorTimeOffEntries
 		m.alternativeTimeOffEntries = msg.alternativeTimeOffEntries
 		m.timesheets = append([]clicktime.Timesheet(nil), msg.timesheets...)
+		if !sameDay(m.weekStart, msg.week) {
+			m.cursor = 0
+		}
 		m.weekStart = msg.week
+		if m.pendingDayCursor != nil {
+			m.dayCursor = *m.pendingDayCursor
+		}
 		m.cursor = min(m.cursor, max(0, len(m.timesheetRows())-1))
 		m.screen = screenDashboard
 		m.refreshing = false
 		m.pendingWeek = time.Time{}
+		m.pendingDayCursor = nil
 		m.loadingText = ""
 		if m.promptForTimesheetReview && m.isLastWeekdayOfTimesheet(m.promptTimesheetDate) {
 			m.screen = screenTimesheetPrompt
@@ -451,6 +459,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = screenDashboard
 			m.refreshing = false
 			m.pendingWeek = time.Time{}
+			m.pendingDayCursor = nil
 			m.loadingText = ""
 		case "save time entry":
 			m.screen = screenReview
@@ -539,11 +548,13 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearQuicktimeFailure()
 		if m.dayCursor > 0 {
 			m.dayCursor--
+			m.pendingDayCursor = nil
 		}
 	case "right", "l":
 		m.clearQuicktimeFailure()
 		if m.dayCursor < 6 {
 			m.dayCursor++
+			m.pendingDayCursor = nil
 		}
 	case "[", "pgup", "shift+left":
 		m.clearQuicktimeFailure()
@@ -554,12 +565,13 @@ func (m Model) updateDashboard(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "t":
 		m.clearQuicktimeFailure()
 		start := startOfWeek(m.now())
-		m.dayCursor = dayIndexInWeek(m.now(), start)
 		if sameDay(start, m.weekStart) {
+			m.dayCursor = dayIndexInWeek(m.now(), start)
 			return m, nil
 		}
-		m.cursor = 0
 		cmd := m.startWeekRefresh(start, "Loading the current week")
+		day := dayIndexInWeek(m.now(), start)
+		m.pendingDayCursor = &day
 		return m, cmd
 	case "r":
 		m.clearQuicktimeFailure()
@@ -682,13 +694,12 @@ func (m *Model) clearQuicktimeFailure() {
 
 func (m Model) changeWeek(days int) (tea.Model, tea.Cmd) {
 	target := m.weekStart.AddDate(0, 0, days)
-	m.cursor = 0
-	if days < 0 {
-		m.dayCursor = 4 // Friday
-	} else {
-		m.dayCursor = 0 // Monday
-	}
 	cmd := m.startWeekRefresh(target, "Loading week of "+target.Format("Jan 2"))
+	day := 0 // Monday
+	if days < 0 {
+		day = 4 // Friday
+	}
+	m.pendingDayCursor = &day
 	return m, cmd
 }
 
@@ -696,6 +707,7 @@ func (m *Model) startWeekRefresh(week time.Time, loadingText string) tea.Cmd {
 	m.screen = screenDashboard
 	m.refreshing = true
 	m.pendingWeek = week
+	m.pendingDayCursor = nil
 	m.loadingText = loadingText
 	m.lastError = nil
 	return m.withSpinner(loadEntriesCmd(m.api, week))

@@ -366,6 +366,7 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	if got := updated.(Model).cursor; got != 1 {
 		t.Fatalf("down cursor = %d, want 1", got)
 	}
+	base.cursor = 1
 	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
 	previous := updated.(Model)
 	if got := previous.weekStart.Format(time.DateOnly); got != "2026-07-27" || previous.screen != screenDashboard || !previous.refreshing {
@@ -374,10 +375,10 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	if got := previous.pendingWeek.Format(time.DateOnly); got != "2026-07-20" {
 		t.Fatalf("[ pending week = %s, want 2026-07-20", got)
 	}
-	if previous.dayCursor != 4 {
-		t.Fatalf("[ selected day = %d, want Friday (4)", previous.dayCursor)
+	if previous.dayCursor != 2 || previous.cursor != 1 {
+		t.Fatalf("[ moved selection before new week loaded: row %d, day %d", previous.cursor, previous.dayCursor)
 	}
-	if view := previous.View(); !strings.Contains(view, "Loading week of Jul 20") || !strings.Contains(view, "job-1") {
+	if view := previous.View(); !strings.Contains(view, "Loading week of Jul 20") || !strings.Contains(view, "job-1") || !strings.Contains(view, "Wed, Jul 29") {
 		t.Fatalf("refreshing dashboard did not preserve the current week:\n%s", view)
 	}
 	updated, _ = previous.Update(entriesMsg{week: previous.pendingWeek})
@@ -385,16 +386,21 @@ func TestDashboardNavigationKeys(t *testing.T) {
 	if got := loaded.weekStart.Format(time.DateOnly); got != "2026-07-20" || loaded.refreshing || !loaded.pendingWeek.IsZero() {
 		t.Fatalf("completed refresh week = %s, refreshing = %v, pending = %s", got, loaded.refreshing, loaded.pendingWeek)
 	}
-	if loaded.dayCursor != 4 {
-		t.Fatalf("loaded prior week selected day = %d, want Friday (4)", loaded.dayCursor)
+	if loaded.dayCursor != 4 || loaded.cursor != 0 || !strings.Contains(loaded.View(), "Fri, Jul 24") {
+		t.Fatalf("loaded prior week selection = row %d, day %d; view:\n%s", loaded.cursor, loaded.dayCursor, loaded.View())
 	}
 	updated, _ = base.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
 	next := updated.(Model)
 	if got := next.pendingWeek.Format(time.DateOnly); got != "2026-08-03" || next.weekStart.Format(time.DateOnly) != "2026-07-27" {
 		t.Fatalf("] visible week = %s, pending week = %s", next.weekStart.Format(time.DateOnly), got)
 	}
-	if next.dayCursor != 0 {
-		t.Fatalf("] selected day = %d, want Monday (0)", next.dayCursor)
+	if next.dayCursor != 2 || next.cursor != 1 || !strings.Contains(next.View(), "Wed, Jul 29") {
+		t.Fatalf("] moved selection before new week loaded: row %d, day %d; view:\n%s", next.cursor, next.dayCursor, next.View())
+	}
+	updated, _ = next.Update(entriesMsg{week: next.pendingWeek})
+	loaded = updated.(Model)
+	if loaded.dayCursor != 0 || loaded.cursor != 0 || !strings.Contains(loaded.View(), "Mon, Aug 3") {
+		t.Fatalf("loaded next week selection = row %d, day %d; view:\n%s", loaded.cursor, loaded.dayCursor, loaded.View())
 	}
 }
 
@@ -453,6 +459,48 @@ func TestWeekRefreshErrorKeepsDashboardVisible(t *testing.T) {
 	dashboard := updated.(Model)
 	if dashboard.screen != screenDashboard || dashboard.refreshing || !dashboard.pendingWeek.IsZero() || dashboard.lastError == nil {
 		t.Fatalf("refresh error screen = %v, refreshing = %v, pending = %s, error = %v", dashboard.screen, dashboard.refreshing, dashboard.pendingWeek, dashboard.lastError)
+	}
+}
+
+func TestWeekNavigationErrorKeepsCurrentSelection(t *testing.T) {
+	t.Parallel()
+
+	week := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return week })
+	model.screen = screenDashboard
+	model.cursor = 1
+	model.dayCursor = 2
+	model.entries = []clicktime.TimeEntry{
+		{Date: "2026-07-27", JobID: "job-1", TaskID: "task-1"},
+		{Date: "2026-07-27", JobID: "job-2", TaskID: "task-2"},
+	}
+
+	updated, _ := model.changeWeek(-7)
+	updated, _ = updated.(Model).Update(operationErrorMsg{op: "load week", err: fmt.Errorf("refresh failed")})
+	dashboard := updated.(Model)
+	if dashboard.cursor != 1 || dashboard.dayCursor != 2 || !sameDay(dashboard.weekStart, week) || dashboard.pendingDayCursor != nil {
+		t.Fatalf("failed week navigation changed selection: row %d, day %d, week %s", dashboard.cursor, dashboard.dayCursor, dashboard.weekStart)
+	}
+}
+
+func TestJumpToTodaySelectsDayWhenWeekLoads(t *testing.T) {
+	t.Parallel()
+
+	today := time.Date(2026, time.August, 5, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return today })
+	model.screen = screenDashboard
+	model.weekStart = time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model.dayCursor = 4
+
+	updated, _ := model.updateDashboard(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	loading := updated.(Model)
+	if loading.dayCursor != 4 || !sameDay(loading.weekStart, model.weekStart) {
+		t.Fatalf("today jump moved selection before new week loaded: day %d, week %s", loading.dayCursor, loading.weekStart)
+	}
+	updated, _ = loading.Update(entriesMsg{week: loading.pendingWeek})
+	loaded := updated.(Model)
+	if loaded.dayCursor != 2 || !sameDay(loaded.weekStart, startOfWeek(today)) || !strings.Contains(loaded.View(), "Wed, Aug 5") {
+		t.Fatalf("today jump selected day %d in week %s; view:\n%s", loaded.dayCursor, loaded.weekStart, loaded.View())
 	}
 }
 
