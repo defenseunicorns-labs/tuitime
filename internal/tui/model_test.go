@@ -107,6 +107,19 @@ func TestTimesheetRowsAndTotals(t *testing.T) {
 	}
 }
 
+func TestTimesheetRowsShowLockedCompanyHolidayFromDayTotal(t *testing.T) {
+	t.Parallel()
+	week := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	model := Model{weekStart: week, alternativeTimeOffEntries: []clicktime.AlternativeTimeOffEntry{{Date: "2026-07-31", Hours: 8, Name: "Company Holiday"}}}
+	rows := model.timesheetRows()
+	if len(rows) != 1 || !rows[0].locked || rows[0].task != "🔒 Company Holiday" || rows[0].hours[4] != 8 {
+		t.Fatalf("company holiday row = %#v", rows)
+	}
+	if model.totalForDate(week.AddDate(0, 0, 4)) != 8 {
+		t.Fatalf("company holiday total = %v", model.totalForDate(week.AddDate(0, 0, 4)))
+	}
+}
+
 func TestNewEntryCategoryFlow(t *testing.T) {
 	t.Parallel()
 	date := time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
@@ -873,7 +886,7 @@ func TestLoadEntriesIncludesTimesheets(t *testing.T) {
 		switch r.URL.Path {
 		case "/Me/Timesheets":
 			_, _ = w.Write([]byte(`{"data":[{"ID":"sheet-1","StartDate":"2026-07-13","EndDate":"2026-07-16"}],"errors":[]}`))
-		case "/Me/TimeEntries", "/Me/TimeOff":
+		case "/Me/TimeEntries", "/Me/TimeOff", "/Me/AlternativeTimeOff":
 			_, _ = w.Write([]byte(`{"data":[],"errors":[]}`))
 		default:
 			http.NotFound(w, r)

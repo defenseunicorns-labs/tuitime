@@ -182,6 +182,20 @@ type TimeOffEntry struct {
 	TimeOffTypeID  string `json:"TimeOffTypeID"`
 }
 
+// AlternativeTimeOffEntry is company-managed, locked time off such as holidays.
+type AlternativeTimeOffEntry struct {
+	Date          string      `json:"Date"`
+	Hours         Number      `json:"Hours"`
+	Name          string      `json:"Name"`
+	DisplayName   string      `json:"DisplayName"`
+	TimeOffTypeID string      `json:"TimeOffTypeID"`
+	TimeOffType   TimeOffType `json:"TimeOffType"`
+}
+
+func (e AlternativeTimeOffEntry) Label() string {
+	return firstNonEmpty(e.DisplayName, e.Name, e.TimeOffType.Label(), e.TimeOffTypeID, "Company Holiday")
+}
+
 func (e TimeOffEntry) Key() string {
 	return firstNonEmpty(e.ID, e.TimeOffEntryID)
 }
@@ -398,6 +412,11 @@ func (c *Client) TimeOff(ctx context.Context, start, end time.Time) ([]TimeOffEn
 		"limit":    {"1000"},
 	}
 	return requestAll[TimeOffEntry](ctx, c, "/Me/TimeOff", query)
+}
+
+func (c *Client) AlternativeTimeOff(ctx context.Context, start, end time.Time) ([]AlternativeTimeOffEntry, error) {
+	query := url.Values{"FromDate": {start.Format(time.DateOnly)}, "ToDate": {end.Format(time.DateOnly)}, "verbose": {"true"}, "limit": {"1000"}}
+	return requestAll[AlternativeTimeOffEntry](ctx, c, "/Me/AlternativeTimeOff", query)
 }
 
 func (c *Client) Timesheets(ctx context.Context, start, end time.Time) ([]Timesheet, error) {
