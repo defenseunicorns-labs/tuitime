@@ -161,6 +161,8 @@ type allDataMsg struct {
 	timeOffTypes              []clicktime.TimeOffType
 	entries                   []clicktime.TimeEntry
 	timeOffEntries            []clicktime.TimeOffEntry
+	priorEntries              []clicktime.TimeEntry
+	priorTimeOffEntries       []clicktime.TimeOffEntry
 	alternativeTimeOffEntries []clicktime.AlternativeTimeOffEntry
 	timesheets                []clicktime.Timesheet
 	week                      time.Time
@@ -169,6 +171,8 @@ type allDataMsg struct {
 type entriesMsg struct {
 	entries                   []clicktime.TimeEntry
 	timeOffEntries            []clicktime.TimeOffEntry
+	priorEntries              []clicktime.TimeEntry
+	priorTimeOffEntries       []clicktime.TimeOffEntry
 	alternativeTimeOffEntries []clicktime.AlternativeTimeOffEntry
 	timesheets                []clicktime.Timesheet
 	week                      time.Time
@@ -222,6 +226,8 @@ type Model struct {
 	timeOffTypes              []clicktime.TimeOffType
 	entries                   []clicktime.TimeEntry
 	timeOffEntries            []clicktime.TimeOffEntry
+	priorEntries              []clicktime.TimeEntry
+	priorTimeOffEntries       []clicktime.TimeOffEntry
 	alternativeTimeOffEntries []clicktime.AlternativeTimeOffEntry
 	timesheets                []clicktime.Timesheet
 
@@ -328,6 +334,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.timeOffTypes = msg.timeOffTypes
 		m.entries = sortedEntries(msg.entries)
 		m.timeOffEntries = sortedTimeOffEntries(msg.timeOffEntries)
+		m.priorEntries = msg.priorEntries
+		m.priorTimeOffEntries = msg.priorTimeOffEntries
 		m.alternativeTimeOffEntries = msg.alternativeTimeOffEntries
 		m.timesheets = append([]clicktime.Timesheet(nil), msg.timesheets...)
 		m.weekStart = msg.week
@@ -349,6 +357,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.entries = sortedEntries(msg.entries)
 		m.timeOffEntries = sortedTimeOffEntries(msg.timeOffEntries)
+		m.priorEntries = msg.priorEntries
+		m.priorTimeOffEntries = msg.priorTimeOffEntries
 		m.alternativeTimeOffEntries = msg.alternativeTimeOffEntries
 		m.timesheets = append([]clicktime.Timesheet(nil), msg.timesheets...)
 		m.weekStart = msg.week
@@ -673,6 +683,11 @@ func (m *Model) clearQuicktimeFailure() {
 func (m Model) changeWeek(days int) (tea.Model, tea.Cmd) {
 	target := m.weekStart.AddDate(0, 0, days)
 	m.cursor = 0
+	if days < 0 {
+		m.dayCursor = 4 // Friday
+	} else {
+		m.dayCursor = 0 // Monday
+	}
 	cmd := m.startWeekRefresh(target, "Loading week of "+target.Format("Jan 2"))
 	return m, cmd
 }
@@ -1292,6 +1307,9 @@ func (m Model) dashboardView() string {
 			switch {
 			case row == table.HeaderRow:
 				style = tableHeaderStyle
+				if col == 7 || col == 8 {
+					style = tableWeekendHeaderStyle
+				}
 			case row == totalRow:
 				style = tableTotalStyle
 			case row == m.cursor && col == m.dayCursor+2:
@@ -1537,6 +1555,44 @@ func (m Model) formField(label, value string, index int) string {
 
 func (m Model) timesheetRows() []timesheetRow {
 	byKey := make(map[string]*timesheetRow)
+	// Prior-week entries supply row identities only. Their hours and entry IDs
+	// must never become part of the selected week's cells or totals.
+	priorWeek := m.weekStart.AddDate(0, 0, -7)
+	for _, entry := range m.priorEntries {
+		if dayForDate(entry.Date, priorWeek) < 0 {
+			continue
+		}
+		key := "project\x00" + entry.JobID + "\x00" + entry.TaskID
+		job := m.jobByID(entry.JobID)
+		client := m.clientByID(job.ClientID)
+		task := m.taskByID(entry.TaskID)
+		projectName := job.Label()
+		if projectName == "" {
+			projectName = entry.JobID
+		}
+		if clientName := client.Label(); clientName != "" && clientName != projectName {
+			projectName = clientName + " / " + projectName
+		}
+		taskName := task.Label()
+		if taskName == "" {
+			taskName = entry.TaskID
+		}
+		byKey[key] = &timesheetRow{kind: projectEntry, jobID: entry.JobID, taskID: entry.TaskID, project: projectName, task: taskName}
+	}
+	for _, entry := range m.priorTimeOffEntries {
+		if dayForDate(entry.Date, priorWeek) < 0 {
+			continue
+		}
+		key := "timeoff\x00" + entry.TimeOffTypeID
+		typeName := m.timeOffTypeByID(entry.TimeOffTypeID).Label()
+		if typeName == "" {
+			typeName = entry.TimeOffTypeID
+		}
+		if strings.Contains(strings.ToLower(typeName), "holiday") || strings.Contains(strings.ToLower(entry.TimeOffTypeID), "holiday") {
+			continue
+		}
+		byKey[key] = &timesheetRow{kind: timeOffEntry, taskID: entry.TimeOffTypeID, project: "Time Off", task: typeName}
+	}
 	for _, entry := range m.entries {
 		day := -1
 		for index := 0; index < 7; index++ {
@@ -2166,6 +2222,7 @@ func loadAllCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		weekEnd := week.AddDate(0, 0, 6)
+		priorWeek := week.AddDate(0, 0, -7)
 
 		var (
 			me                        clicktime.Me
@@ -2188,9 +2245,12 @@ func loadAllCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 				timesheets, err = api.Timesheets(ctx, week, weekEnd)
 				return err
 			},
-			func(ctx context.Context) (err error) { entries, err = api.TimeEntries(ctx, week, weekEnd); return err },
 			func(ctx context.Context) (err error) {
-				timeOffEntries, err = api.TimeOff(ctx, week, weekEnd)
+				entries, err = api.TimeEntries(ctx, priorWeek, weekEnd)
+				return err
+			},
+			func(ctx context.Context) (err error) {
+				timeOffEntries, err = api.TimeOff(ctx, priorWeek, weekEnd)
 				return err
 			},
 			func(ctx context.Context) (err error) {
@@ -2201,9 +2261,12 @@ func loadAllCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		if err != nil {
 			return operationErrorMsg{op: "initial load", err: err}
 		}
+		priorEntries, entries := splitWeekEntries(entries, week)
+		priorTimeOffEntries, timeOffEntries := splitWeekTimeOffEntries(timeOffEntries, week)
 		return allDataMsg{
 			me: me, clients: clients, jobs: jobs, tasks: tasks, timeOffTypes: timeOffTypes,
-			entries: entries, timeOffEntries: timeOffEntries, alternativeTimeOffEntries: alternativeTimeOffEntries, timesheets: timesheets, week: week,
+			entries: entries, timeOffEntries: timeOffEntries, priorEntries: priorEntries, priorTimeOffEntries: priorTimeOffEntries,
+			alternativeTimeOffEntries: alternativeTimeOffEntries, timesheets: timesheets, week: week,
 		}
 	}
 }
@@ -2213,6 +2276,7 @@ func loadEntriesCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		weekEnd := week.AddDate(0, 0, 6)
+		priorWeek := week.AddDate(0, 0, -7)
 
 		var (
 			timesheets                []clicktime.Timesheet
@@ -2225,9 +2289,12 @@ func loadEntriesCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 				timesheets, err = api.Timesheets(ctx, week, weekEnd)
 				return err
 			},
-			func(ctx context.Context) (err error) { entries, err = api.TimeEntries(ctx, week, weekEnd); return err },
 			func(ctx context.Context) (err error) {
-				timeOffEntries, err = api.TimeOff(ctx, week, weekEnd)
+				entries, err = api.TimeEntries(ctx, priorWeek, weekEnd)
+				return err
+			},
+			func(ctx context.Context) (err error) {
+				timeOffEntries, err = api.TimeOff(ctx, priorWeek, weekEnd)
 				return err
 			},
 			func(ctx context.Context) (err error) {
@@ -2238,8 +2305,37 @@ func loadEntriesCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		if err != nil {
 			return operationErrorMsg{op: "load week", err: err}
 		}
-		return entriesMsg{entries: entries, timeOffEntries: timeOffEntries, alternativeTimeOffEntries: alternativeTimeOffEntries, timesheets: timesheets, week: week}
+		priorEntries, entries := splitWeekEntries(entries, week)
+		priorTimeOffEntries, timeOffEntries := splitWeekTimeOffEntries(timeOffEntries, week)
+		return entriesMsg{entries: entries, timeOffEntries: timeOffEntries, priorEntries: priorEntries, priorTimeOffEntries: priorTimeOffEntries,
+			alternativeTimeOffEntries: alternativeTimeOffEntries, timesheets: timesheets, week: week}
 	}
+}
+
+func splitWeekEntries(entries []clicktime.TimeEntry, week time.Time) (prior, current []clicktime.TimeEntry) {
+	priorWeek := week.AddDate(0, 0, -7)
+	for _, entry := range entries {
+		switch {
+		case dayForDate(entry.Date, priorWeek) >= 0:
+			prior = append(prior, entry)
+		case dayForDate(entry.Date, week) >= 0:
+			current = append(current, entry)
+		}
+	}
+	return prior, current
+}
+
+func splitWeekTimeOffEntries(entries []clicktime.TimeOffEntry, week time.Time) (prior, current []clicktime.TimeOffEntry) {
+	priorWeek := week.AddDate(0, 0, -7)
+	for _, entry := range entries {
+		switch {
+		case dayForDate(entry.Date, priorWeek) >= 0:
+			prior = append(prior, entry)
+		case dayForDate(entry.Date, week) >= 0:
+			current = append(current, entry)
+		}
+	}
+	return prior, current
 }
 
 func runConcurrent(ctx context.Context, operations ...func(context.Context) error) error {

@@ -5,6 +5,7 @@
 ## Features
 
 - View projects, tasks, time off, daily hours, and totals in a Monday–Sunday table
+- Keep project/task and leave rows used in the prior week visible as empty rows in the selected week, excluding holidays
 - Mark today with `*`, ClickTime timesheet period ends with `+`, and both with `※`
 - Show each timesheet period's current status and highlight the period containing the selected day
 - Center the application within the terminal viewport
@@ -68,6 +69,7 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 
 - Pressing `n` looks back four weeks from the selected date and offers recently used project/task combinations. **Browse all projects** and **Time Off** remain available in that picker.
 - Pressing `e` on an empty project/task cell opens a new entry for that date and row.
+- Rows carried from the prior week have no hours until you add an entry. They do not affect current-week totals or timesheet submission.
 - Quicktime creates an entry without notes in an empty cell, or replaces the hours of a single existing entry while preserving its note. Cells with multiple entries must be edited normally. Press `.` for a reminder that fractional hours must be added by editing the cell.
 - In a picker, `/` starts filtering, `enter` selects, `esc` goes back one page, and `q` cancels the entry flow.
 - The selected date is read-only in the entry form.
