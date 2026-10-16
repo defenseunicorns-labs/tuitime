@@ -188,11 +188,12 @@ type recentProjectsMsg struct {
 }
 
 type timesheetReadyMsg struct {
-	timesheet            clicktime.Timesheet
-	actions              []clicktime.TimesheetAction
-	attestationStatement string
-	entries              []clicktime.TimeEntry
-	timeOffEntries       []clicktime.TimeOffEntry
+	alternativeTimeOffEntries []clicktime.AlternativeTimeOffEntry
+	timesheet                 clicktime.Timesheet
+	actions                   []clicktime.TimesheetAction
+	attestationStatement      string
+	entries                   []clicktime.TimeEntry
+	timeOffEntries            []clicktime.TimeOffEntry
 }
 
 type timesheetSubmittedMsg struct {
@@ -231,22 +232,23 @@ type Model struct {
 	alternativeTimeOffEntries []clicktime.AlternativeTimeOffEntry
 	timesheets                []clicktime.Timesheet
 
-	weekStart                time.Time
-	pendingWeek              time.Time
-	pendingDayCursor         *int
-	cursor                   int
-	dayCursor                int
-	status                   string
-	refreshing               bool
-	quicktimeFailure         bool
-	lastError                error
-	pendingDeleteEntries     []trackedEntry
-	timesheetToSubmit        clicktime.Timesheet
-	submissionEntries        []clicktime.TimeEntry
-	submissionTimeOff        []clicktime.TimeOffEntry
-	attestationStatement     string
-	promptForTimesheetReview bool
-	promptTimesheetDate      time.Time
+	weekStart                    time.Time
+	pendingWeek                  time.Time
+	pendingDayCursor             *int
+	cursor                       int
+	dayCursor                    int
+	status                       string
+	refreshing                   bool
+	quicktimeFailure             bool
+	lastError                    error
+	pendingDeleteEntries         []trackedEntry
+	timesheetToSubmit            clicktime.Timesheet
+	submissionEntries            []clicktime.TimeEntry
+	submissionTimeOff            []clicktime.TimeOffEntry
+	submissionAlternativeTimeOff []clicktime.AlternativeTimeOffEntry
+	attestationStatement         string
+	promptForTimesheetReview     bool
+	promptTimesheetDate          time.Time
 
 	picker         list.Model
 	pickerKind     pickerKind
@@ -404,6 +406,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.timesheetToSubmit = msg.timesheet
 		m.submissionEntries = sortedEntries(msg.entries)
 		m.submissionTimeOff = sortedTimeOffEntries(msg.timeOffEntries)
+		m.submissionAlternativeTimeOff = msg.alternativeTimeOffEntries
 		m.attestationStatement = strings.TrimSpace(msg.attestationStatement)
 		if !hasTimesheetAction(msg.actions, "Submit") {
 			status := strings.TrimSpace(msg.timesheet.Status)
@@ -1208,6 +1211,7 @@ func (m Model) beginTimesheetSubmission(date time.Time) (tea.Model, tea.Cmd) {
 	m.timesheetToSubmit = clicktime.Timesheet{}
 	m.submissionEntries = nil
 	m.submissionTimeOff = nil
+	m.submissionAlternativeTimeOff = nil
 	m.attestationStatement = ""
 	return m, m.withSpinner(loadTimesheetForSubmissionCmd(m.api, date))
 }
@@ -1947,11 +1951,24 @@ func (m Model) submissionChargeCodeHours() ([]submissionChargeCode, map[string]m
 		addCode(key, "Time Off / "+typeName, date, float64(entry.Hours))
 	}
 
+	for _, entry := range m.submissionAlternativeTimeOff {
+		date := dateString(entry.Date)
+		if date == "" {
+			continue
+		}
+		addCode("alternative-timeoff\x00"+entry.Label(), "Time Off / "+entry.Label(), date, float64(entry.Hours))
+	}
+
 	codes := make([]submissionChargeCode, 0, len(codeByKey))
 	for _, code := range codeByKey {
 		codes = append(codes, *code)
 	}
 	sort.Slice(codes, func(i, j int) bool {
+		iHoliday := strings.HasPrefix(codes[i].key, "alternative-timeoff\x00")
+		jHoliday := strings.HasPrefix(codes[j].key, "alternative-timeoff\x00")
+		if iHoliday != jHoliday {
+			return !iHoliday
+		}
 		return codes[i].name < codes[j].name
 	})
 	for index := range codes {
@@ -2399,6 +2416,10 @@ func loadTimesheetForSubmissionCmd(api *clicktime.Client, date time.Time) tea.Cm
 		if err != nil {
 			return operationErrorMsg{op: "load timesheet", err: err}
 		}
+		alternativeTimeOffEntries, err := api.AlternativeTimeOff(ctx, start, end)
+		if err != nil {
+			return operationErrorMsg{op: "load timesheet", err: err}
+		}
 		actions, err := api.TimesheetActions(ctx, timesheet.ID)
 		if err != nil {
 			return operationErrorMsg{op: "load timesheet", err: err}
@@ -2409,9 +2430,10 @@ func loadTimesheetForSubmissionCmd(api *clicktime.Client, date time.Time) tea.Cm
 		}
 		return timesheetReadyMsg{
 			timesheet: timesheet, actions: actions,
-			attestationStatement: company.AttestationStatement,
-			entries:              entries,
-			timeOffEntries:       timeOffEntries,
+			attestationStatement:      company.AttestationStatement,
+			entries:                   entries,
+			timeOffEntries:            timeOffEntries,
+			alternativeTimeOffEntries: alternativeTimeOffEntries,
 		}
 	}
 }

@@ -526,6 +526,11 @@ func TestTimesheetSubmissionFlow(t *testing.T) {
 				t.Errorf("time off query = %s", r.URL.RawQuery)
 			}
 			_, _ = w.Write([]byte(`{"data":[],"errors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/Me/AlternativeTimeOff":
+			if r.URL.Query().Get("FromDate") != "2026-07-01" || r.URL.Query().Get("ToDate") != "2026-07-15" {
+				t.Errorf("holiday query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":[{"Date":"2026-07-03","Hours":8,"Name":"Company Holiday"}],"errors":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/Me/Timesheets/sheet-1/Actions":
 			_, _ = w.Write([]byte(`{"data":[{"Action":"Submit"}],"errors":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/Company":
@@ -571,7 +576,7 @@ func TestTimesheetSubmissionFlow(t *testing.T) {
 		t.Fatalf("timesheet review screen = %v, timesheet = %#v", review.screen, review.timesheetToSubmit)
 	}
 	view := review.View()
-	for _, text := range []string{"Submit this timesheet?", "Jul 1–15, 2026", "40.00", "Calendar", "Jun 29 - Jul 5", "Jul 6 - Jul 12", "Code1", "Code2", "Wed Jul 01", "Wed Jul 15", "Code1 - 20.00h", "Code2 - 4.00h", "These are weekdays without any time entry. FTO need not be included in ClickTime.", "entire period", "I certify that these hours are complete and accurate."} {
+	for _, text := range []string{"Submit this timesheet?", "Jul 1–15, 2026", "40.00", "Calendar", "Jun 29 - Jul 5", "Jul 6 - Jul 12", "Code1", "Code2", "Wed Jul 01", "Wed Jul 15", "Code1 - 20.00h", "Code2 - 4.00h", "Code3 - 8.00h - Time Off / Company Holiday", "These are weekdays without any time entry. FTO need not be included in ClickTime.", "entire period", "I certify that these hours are complete and accurate."} {
 		if !strings.Contains(view, text) {
 			t.Fatalf("timesheet review does not contain %q:\n%s", text, view)
 		}
@@ -599,8 +604,57 @@ func TestTimesheetSubmissionFlow(t *testing.T) {
 	if dashboardLoading.screen != screenDashboard || !dashboardLoading.refreshing || dashboardLoading.status != "Timesheet submitted for approval." || refreshCmd == nil {
 		t.Fatalf("submitted screen = %v, refreshing = %v, status = %q, cmd = %v", dashboardLoading.screen, dashboardLoading.refreshing, dashboardLoading.status, refreshCmd)
 	}
-	if requests != 6 {
-		t.Fatalf("requests = %d, want 6", requests)
+	if requests != 7 {
+		t.Fatalf("requests = %d, want 7", requests)
+	}
+}
+
+func TestSubmissionHolidayIsLastCode(t *testing.T) {
+	t.Parallel()
+
+	for _, holidayOnly := range []bool{false, true} {
+		model := Model{
+			submissionAlternativeTimeOff: []clicktime.AlternativeTimeOffEntry{
+				{Date: "2026-07-03", Hours: 8, Name: "Company Holiday"},
+				{Date: "2026-07-10", Hours: 4, Name: "Company Holiday"},
+			},
+		}
+		if !holidayOnly {
+			model.submissionEntries = []clicktime.TimeEntry{{Date: "2026-07-03", Hours: 2, JobID: "project", TaskID: "task"}}
+			model.timeOffTypes = []clicktime.TimeOffType{{ID: "vacation", Name: "Vacation"}}
+			model.submissionTimeOff = []clicktime.TimeOffEntry{{Date: "2026-07-02", Hours: 8, TimeOffTypeID: "vacation"}}
+		}
+		codes, hours, totals := model.submissionChargeCodeHours()
+		wantCount := 3
+		if holidayOnly {
+			wantCount = 1
+		}
+		if len(codes) != wantCount {
+			t.Fatalf("holidayOnly=%v: codes = %#v", holidayOnly, codes)
+		}
+		holiday := codes[len(codes)-1]
+		if holiday.name != "Time Off / Company Holiday" || holiday.total != 12 || holiday.alias != fmt.Sprintf("Code%d", wantCount) {
+			t.Fatalf("holidayOnly=%v: last code = %#v", holidayOnly, holiday)
+		}
+		wantDayTotal := 10.0
+		if holidayOnly {
+			wantDayTotal = 8
+		}
+		if hours["2026-07-03"][holiday.key] != 8 || hours["2026-07-10"][holiday.key] != 4 || totals["2026-07-03"] != wantDayTotal {
+			t.Fatalf("holidayOnly=%v: hours = %#v, totals = %#v", holidayOnly, hours, totals)
+		}
+		view := model.timesheetCalendarView(clicktime.Timesheet{StartDate: "2026-07-03", EndDate: "2026-07-03"})
+		if strings.Contains(view, "These are weekdays without any time entry.") {
+			t.Fatalf("holiday should count as recorded time in calendar:\n%s", view)
+		}
+		wantRow := fmt.Sprintf("%-12s", "Fri Jul 03")
+		if !holidayOnly {
+			wantRow += fmt.Sprintf("%9s%9s", formatTableHours(0), "2.00")
+		}
+		wantRow += fmt.Sprintf("%9s", "8.00")
+		if !strings.Contains(view, wantRow) {
+			t.Fatalf("holiday hours missing from final calendar column, want %q:\n%s", wantRow, view)
+		}
 	}
 }
 
