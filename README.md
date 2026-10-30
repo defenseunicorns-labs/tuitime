@@ -15,7 +15,7 @@
 - Enter the date, hours, and notes
 - Review an entry before it is sent to ClickTime
 - Add 1–9 whole hours as **quicktime** on an existing time-entry row, replacing a single existing entry when present
-- After saving at least 8 total hours on the final weekday of a pay period, optionally jump to timesheet review
+- After saving time on the final weekday of a pay period, optionally jump to timesheet review when the day totals at least 8 hours or every editable row has an entry for that day, including zero hours
 - Edit an existing entry and confirm the update
 - Submit the ClickTime timesheet containing the selected day for approval
 - Filter client, project, and task pickers
@@ -73,6 +73,7 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 - Quicktime creates an entry without notes in an empty cell, or replaces the hours of a single existing entry while preserving its note. Cells with multiple entries must be edited normally. Press `.` for a reminder that fractional hours must be added by editing the cell.
 - In a picker, `/` starts filtering, `enter` selects, `esc` goes back one page, and `q` cancels the entry flow.
 - The selected date is read-only in the entry form.
+- Hours can be 0 through 24. ClickTime must allow [zero-hour entries](https://www.clicktime.com/assets/Help_WeekView.pdf) for your company to save them. A saved zero-hour entry displays as `0.00` and counts as a filled cell; an empty cell displays as `·`.
 - In the form, `tab` moves between fields, `ctrl+r` opens review, and `esc` returns to the previous picker.
 - On review, `y` `enter` submits; `b` `esc` goes back.
 - `ctrl+c` exits from any screen.
@@ -84,7 +85,7 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 - The confirmation screen shows ClickTime's full period, status, and total hours.
 - Submission is offered only when ClickTime reports `Submit` as an available action.
 - Press `y` or `enter` to attest that the timesheet is accurate and submit the entire period for approval; `b` or `esc` cancels.
-- When saving an entry on the period's final weekday, tuitime asks whether to review that period for submission once the day's total across all rows reaches at least 8 hours; press `y` or `enter` to continue, or `n`, `b`, or `esc` to remain in the weekly view.
+- When saving an entry on the period's final weekday, tuitime asks whether to review that period for submission once the day's total reaches at least 8 hours or every editable row in the weekly view has a saved entry for that day, including zero hours. This includes rows carried from the prior week; locked holiday rows do not need to be filled. Press `y` or `enter` to continue, or `n`, `b`, or `esc` to remain in the weekly view.
 
 ## Development
 
