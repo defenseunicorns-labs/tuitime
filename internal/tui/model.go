@@ -377,7 +377,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingWeek = time.Time{}
 		m.pendingDayCursor = nil
 		m.loadingText = ""
-		if m.promptForTimesheetReview && m.isLastWeekdayOfTimesheet(m.promptTimesheetDate) {
+		if m.promptForTimesheetReview && m.isLastWeekdayOfTimesheet(m.promptTimesheetDate) &&
+			(m.totalForDate(m.promptTimesheetDate) >= 8 || m.allRowsFilledForDate(m.promptTimesheetDate)) {
 			m.screen = screenTimesheetPrompt
 		}
 		m.promptForTimesheetReview = false
@@ -1292,7 +1293,7 @@ func (m Model) dashboardView() string {
 	for _, row := range rows {
 		values := []string{row.project, row.task}
 		for day := 0; day < 7; day++ {
-			values = append(values, formatTableHours(row.hours[day]))
+			values = append(values, formatEntryHours(row.hours[day], len(row.entries[day]) > 0))
 		}
 		values = append(values, formatTableHours(row.total))
 		data = append(data, values)
@@ -1844,6 +1845,9 @@ func (m Model) timesheetCalendarView(timesheet clicktime.Timesheet) string {
 		for _, total := range timesheet.DayTotals {
 			if date := dateString(total.Date); date != "" {
 				hours := float64(total.Hours)
+				if hours == 0 {
+					continue
+				}
 				hoursByDateCode[date] = map[string]float64{"total": hours}
 				totalsByDate[date] = hours
 			}
@@ -1866,12 +1870,14 @@ func (m Model) timesheetCalendarView(timesheet clicktime.Timesheet) string {
 			inPeriod := !date.Before(start) && !date.After(end)
 			dateKey := date.Format(time.DateOnly)
 			row := []string{date.Format("Mon Jan 02")}
-			emptyWeekday := inPeriod && isWeekday(date) && totalsByDate[dateKey] == 0
+			_, hasEntries := totalsByDate[dateKey]
+			emptyWeekday := inPeriod && isWeekday(date) && !hasEntries
 			hasEmptyWeekday = hasEmptyWeekday || emptyWeekday
 			for _, code := range codes {
 				value := ""
 				if inPeriod {
-					value = formatTableHours(hoursByDateCode[dateKey][code.key])
+					hours, hasEntry := hoursByDateCode[dateKey][code.key]
+					value = formatEntryHours(hours, hasEntry)
 				}
 				row = append(row, value)
 			}
@@ -2117,6 +2123,13 @@ func formatTableHours(hours float64) string {
 	return strconv.FormatFloat(hours, 'f', 2, 64)
 }
 
+func formatEntryHours(hours float64, hasEntry bool) string {
+	if hasEntry {
+		return strconv.FormatFloat(hours, 'f', 2, 64)
+	}
+	return formatTableHours(hours)
+}
+
 func hiddenTimeOffType(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "fto", "military", "medical", "parental":
@@ -2128,6 +2141,24 @@ func hiddenTimeOffType(name string) bool {
 
 func (m Model) totalForDate(date time.Time) float64 {
 	return m.recordedHoursForDate(date) + m.companyHolidayHours(date)
+}
+
+func (m Model) allRowsFilledForDate(date time.Time) bool {
+	day := dayForDate(date.Format(time.DateOnly), m.weekStart)
+	if day < 0 {
+		return false
+	}
+	hasEditableRows := false
+	for _, row := range m.timesheetRows() {
+		if row.locked {
+			continue
+		}
+		hasEditableRows = true
+		if len(row.entries[day]) == 0 {
+			return false
+		}
+	}
+	return hasEditableRows
 }
 
 func (m Model) recordedHoursForDate(date time.Time) float64 {
@@ -2336,8 +2367,10 @@ func loadEntriesCmd(api *clicktime.Client, week time.Time) tea.Cmd {
 		}
 		priorEntries, entries := splitWeekEntries(entries, week)
 		priorTimeOffEntries, timeOffEntries := splitWeekTimeOffEntries(timeOffEntries, week)
-		return entriesMsg{entries: entries, timeOffEntries: timeOffEntries, priorEntries: priorEntries, priorTimeOffEntries: priorTimeOffEntries,
-			alternativeTimeOffEntries: alternativeTimeOffEntries, timesheets: timesheets, week: week}
+		return entriesMsg{
+			entries: entries, timeOffEntries: timeOffEntries, priorEntries: priorEntries, priorTimeOffEntries: priorTimeOffEntries,
+			alternativeTimeOffEntries: alternativeTimeOffEntries, timesheets: timesheets, week: week,
+		}
 	}
 }
 
@@ -2538,8 +2571,8 @@ func validateForm(dateValue, hoursValue string) (string, float64, error) {
 	if err != nil {
 		return "", 0, fmt.Errorf("hours must be a number")
 	}
-	if math.IsNaN(hours) || math.IsInf(hours, 0) || hours <= 0 || hours > 24 {
-		return "", 0, fmt.Errorf("hours must be greater than 0 and no more than 24")
+	if math.IsNaN(hours) || math.IsInf(hours, 0) || hours < 0 || hours > 24 {
+		return "", 0, fmt.Errorf("hours must be between 0 and 24")
 	}
 	return date.Format(time.DateOnly), hours, nil
 }

@@ -51,10 +51,13 @@ func TestValidateForm(t *testing.T) {
 	}{
 		{name: "valid decimal", date: "2026-07-28", hours: "7.5"},
 		{name: "bad date", date: "07/28/2026", hours: "7.5", wantErr: true},
-		{name: "zero", date: "2026-07-28", hours: "0", wantErr: true},
+		{name: "zero", date: "2026-07-28", hours: "0"},
+		{name: "negative", date: "2026-07-28", hours: "-1", wantErr: true},
+		{name: "blank", date: "2026-07-28", hours: "", wantErr: true},
 		{name: "too many", date: "2026-07-28", hours: "25", wantErr: true},
 		{name: "not a number", date: "2026-07-28", hours: "lots", wantErr: true},
 		{name: "NaN", date: "2026-07-28", hours: "NaN", wantErr: true},
+		{name: "infinity", date: "2026-07-28", hours: "Inf", wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1211,6 +1214,7 @@ func TestSaveOnLastPayPeriodWeekdayOffersTimesheetReview(t *testing.T) {
 	}
 	updated, _ = refreshing.Update(entriesMsg{
 		week:       refreshing.weekStart,
+		entries:    []clicktime.TimeEntry{{Date: "2026-07-31", Hours: 8}},
 		timesheets: []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-08-02"}}, // Sunday
 	})
 	prompt := updated.(Model)
@@ -1230,6 +1234,251 @@ func TestSaveOnLastPayPeriodWeekdayOffersTimesheetReview(t *testing.T) {
 	updated, _ = prompt.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if declined := updated.(Model); declined.screen != screenDashboard {
 		t.Fatalf("declining prompt: screen = %v, want dashboard", declined.screen)
+	}
+}
+
+func TestTimesheetReviewPromptWaitsForDailyTotal(t *testing.T) {
+	t.Parallel()
+	date := time.Date(2026, time.July, 31, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return date })
+	model.draft = draft{date: date.Format(time.DateOnly)}
+
+	entries := []clicktime.TimeEntry{
+		{Date: "2026-07-30", Hours: 8, JobID: "other-day"},
+	}
+	for index, hours := range []clicktime.Number{2, 3, 3} {
+		entries = append(entries, clicktime.TimeEntry{
+			Date: "2026-07-31", Hours: hours, JobID: fmt.Sprintf("project-%d", index),
+		})
+		updated, _ := model.Update(savedMsg{})
+		model = updated.(Model)
+		updated, _ = model.Update(entriesMsg{
+			week:       model.weekStart,
+			entries:    entries,
+			timesheets: []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-08-02"}},
+		})
+		model = updated.(Model)
+		want := screenDashboard
+		if index == 2 {
+			want = screenTimesheetPrompt
+		}
+		if model.screen != want {
+			t.Fatalf("after saving row %d (daily total %.2f): screen = %v, want %v", index+1, model.totalForDate(date), model.screen, want)
+		}
+	}
+}
+
+func TestTimesheetReviewPromptDailyHoursThreshold(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		date    string
+		hours   clicktime.Number
+		timeOff clicktime.Number
+		want    screen
+	}{
+		{name: "below eight", date: "2026-07-31", hours: 7.99, want: screenDashboard},
+		{name: "exactly eight", date: "2026-07-31", hours: 8, want: screenTimesheetPrompt},
+		{name: "above eight", date: "2026-07-31", hours: 9, want: screenTimesheetPrompt},
+		{name: "work and time off", date: "2026-07-31", hours: 4, timeOff: 4, want: screenTimesheetPrompt},
+		{name: "earlier weekday", date: "2026-07-30", hours: 8, want: screenDashboard},
+		{name: "weekend period end", date: "2026-08-02", hours: 8, want: screenDashboard},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			date, err := time.Parse(time.DateOnly, test.date)
+			if err != nil {
+				t.Fatal(err)
+			}
+			model := NewAt(nil, func() time.Time { return date })
+			model.draft = draft{date: test.date}
+			// The refreshed total must replace the pre-save total, including edits downward.
+			model.entries = []clicktime.TimeEntry{{Date: test.date, Hours: 8}}
+			updated, _ := model.Update(savedMsg{})
+			model = updated.(Model)
+			updated, _ = model.Update(entriesMsg{
+				week:           model.weekStart,
+				entries:        []clicktime.TimeEntry{{Date: test.date, Hours: test.hours}},
+				timeOffEntries: []clicktime.TimeOffEntry{{Date: test.date, Hours: test.timeOff}},
+				priorEntries:   []clicktime.TimeEntry{{Date: "2026-07-24", JobID: "unfilled-row", Hours: 8}},
+				timesheets:     []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-08-02"}},
+			})
+			if got := updated.(Model); got.screen != test.want {
+				t.Fatalf("screen = %v, want %v (daily total %.2f)", got.screen, test.want, got.totalForDate(date))
+			}
+		})
+	}
+}
+
+func TestTimesheetReviewPromptWhenAllRowsFilledForHalfDay(t *testing.T) {
+	t.Parallel()
+	date := time.Date(2026, time.July, 31, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return date })
+	model.draft = draft{date: date.Format(time.DateOnly)}
+	priorEntries := []clicktime.TimeEntry{
+		{Date: "2026-07-24", JobID: "project-0", Hours: 2},
+		{Date: "2026-07-24", JobID: "project-1", Hours: 3},
+		{Date: "2026-07-24", JobID: "project-2", Hours: 3},
+	}
+	var entries []clicktime.TimeEntry
+	for index, hours := range []clicktime.Number{1, 1, 2} {
+		entries = append(entries, clicktime.TimeEntry{
+			Date: "2026-07-31", Hours: hours, JobID: fmt.Sprintf("project-%d", index),
+		})
+		updated, _ := model.Update(savedMsg{})
+		model = updated.(Model)
+		updated, _ = model.Update(entriesMsg{
+			week:         model.weekStart,
+			entries:      entries,
+			priorEntries: priorEntries,
+			timesheets:   []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-08-02"}},
+		})
+		model = updated.(Model)
+		want := screenDashboard
+		if index == 2 {
+			want = screenTimesheetPrompt
+		}
+		if model.screen != want {
+			t.Fatalf("after filling row %d (daily total %.2f): screen = %v, want %v", index+1, model.totalForDate(date), model.screen, want)
+		}
+	}
+}
+
+func TestAllRowsFilledForDate(t *testing.T) {
+	t.Parallel()
+	date := time.Date(2026, time.July, 31, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		model Model
+		want  bool
+	}{
+		{name: "no rows"},
+		{name: "single row half day", model: Model{entries: []clicktime.TimeEntry{
+			{Date: "2026-07-31", JobID: "project", Hours: 4},
+		}}, want: true},
+		{name: "row filled on another day", model: Model{entries: []clicktime.TimeEntry{
+			{Date: "2026-07-30", JobID: "project", Hours: 4},
+		}}},
+		{name: "zero hours", model: Model{entries: []clicktime.TimeEntry{
+			{Date: "2026-07-31", JobID: "project", Hours: 0},
+		}}, want: true},
+		{name: "zero hours time off", model: Model{timeOffEntries: []clicktime.TimeOffEntry{
+			{Date: "2026-07-31", TimeOffTypeID: "vacation", Hours: 0},
+		}}, want: true},
+		{name: "unfilled time off row", model: Model{
+			entries:             []clicktime.TimeEntry{{Date: "2026-07-31", JobID: "project", Hours: 2}},
+			priorTimeOffEntries: []clicktime.TimeOffEntry{{Date: "2026-07-24", TimeOffTypeID: "vacation", Hours: 2}},
+		}},
+		{name: "work and time off filled", model: Model{
+			entries:        []clicktime.TimeEntry{{Date: "2026-07-31", JobID: "project", Hours: 2}},
+			timeOffEntries: []clicktime.TimeOffEntry{{Date: "2026-07-31", TimeOffTypeID: "vacation", Hours: 2}},
+		}, want: true},
+		{name: "locked holiday on another day", model: Model{
+			entries:                   []clicktime.TimeEntry{{Date: "2026-07-31", JobID: "project", Hours: 4}},
+			alternativeTimeOffEntries: []clicktime.AlternativeTimeOffEntry{{Date: "2026-07-30", Name: "Company Holiday", Hours: 8}},
+		}, want: true},
+		{name: "only locked rows", model: Model{
+			alternativeTimeOffEntries: []clicktime.AlternativeTimeOffEntry{{Date: "2026-07-31", Name: "Company Holiday", Hours: 4}},
+		}},
+		{name: "date outside displayed week", model: Model{weekStart: date.AddDate(0, 0, 7)}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			model := test.model
+			if model.weekStart.IsZero() {
+				model.weekStart = startOfWeek(date)
+			}
+			if got := model.allRowsFilledForDate(date); got != test.want {
+				t.Fatalf("allRowsFilledForDate() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestZeroHourEntryCanBeSavedAndCompleteSubmissionDay(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name    string
+		kind    entryKind
+		entryID string
+	}{
+		{name: "create project", kind: projectEntry},
+		{name: "edit project", kind: projectEntry, entryID: "existing"},
+		{name: "create time off", kind: timeOffEntry},
+		{name: "edit time off", kind: timeOffEntry, entryID: "existing"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]json.RawMessage
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode saved entry: %v", err)
+				}
+				if string(body["Hours"]) != "0" {
+					t.Errorf("Hours = %s, want explicit zero", body["Hours"])
+				}
+				_, _ = w.Write([]byte(`{"data":{"ID":"saved-zero","Hours":0},"errors":[]}`))
+			}))
+			defer server.Close()
+
+			date := time.Date(2026, time.July, 31, 0, 0, 0, 0, time.UTC)
+			model := NewAt(clicktime.NewWithBaseURL("secret", server.URL, server.Client()), func() time.Time { return date })
+			model.draft = draft{kind: test.kind, date: "2026-07-31", jobID: "zero-project", timeOffTypeID: "vacation", entryID: test.entryID}
+			model.hoursInput.SetValue("0")
+			updated, _ := model.prepareReview()
+			review := updated.(Model)
+			if review.screen != screenReview || review.lastError != nil || review.draft.hours != 0 {
+				t.Fatalf("zero-hour review: screen = %v, error = %v, hours = %v", review.screen, review.lastError, review.draft.hours)
+			}
+			updated, cmd := review.updateReview(tea.KeyMsg{Type: tea.KeyEnter})
+			saving := updated.(Model)
+			if saving.screen != screenSaving || cmd == nil {
+				t.Fatalf("zero-hour save: screen = %v, cmd = %v", saving.screen, cmd)
+			}
+			updated, _ = saving.Update(nonSpinnerMessage(t, cmd))
+			refreshing := updated.(Model)
+			if !refreshing.refreshing || refreshing.lastError != nil {
+				t.Fatalf("zero-hour save did not succeed: refreshing = %v, error = %v", refreshing.refreshing, refreshing.lastError)
+			}
+			refresh := entriesMsg{
+				week:       refreshing.weekStart,
+				entries:    []clicktime.TimeEntry{{Date: "2026-07-31", JobID: "worked-project", Hours: 4}},
+				timesheets: []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-08-02"}},
+			}
+			if test.kind == projectEntry {
+				refresh.entries = append(refresh.entries, clicktime.TimeEntry{ID: "saved-zero", Date: "2026-07-31", JobID: "zero-project", Hours: 0})
+			} else {
+				refresh.timeOffEntries = []clicktime.TimeOffEntry{{ID: "saved-zero", Date: "2026-07-31", TimeOffTypeID: "vacation", Hours: 0}}
+			}
+			updated, _ = refreshing.Update(refresh)
+			if got := updated.(Model); got.screen != screenTimesheetPrompt || got.totalForDate(date) != 4 {
+				t.Fatalf("after saving zero: screen = %v, total = %v, want prompt at 4 hours", got.screen, got.totalForDate(date))
+			}
+		})
+	}
+}
+
+func TestZeroHourEntriesDisplayDifferentlyFromEmptyCells(t *testing.T) {
+	t.Parallel()
+	model := NewAt(nil, func() time.Time { return time.Date(2026, time.July, 31, 0, 0, 0, 0, time.UTC) })
+	model.entries = []clicktime.TimeEntry{{Date: "2026-07-31", JobID: "project", Hours: 0}}
+	model.submissionEntries = model.entries
+	model.timesheetToSubmit = clicktime.Timesheet{StartDate: "2026-07-27", EndDate: "2026-08-02"}
+	weekly := model.dashboardView()
+	hasZeroCell := false
+	for _, line := range strings.Split(weekly, "\n") {
+		if strings.Contains(line, "│") && strings.Contains(line, "project") && strings.Contains(line, "0.00") {
+			hasZeroCell = true
+		}
+	}
+	if !hasZeroCell || !strings.Contains(weekly, "·") {
+		t.Fatalf("weekly view should distinguish zero-hour entries from empty cells:\n%s", weekly)
+	}
+	calendar := model.timesheetReviewView()
+	if !strings.Contains(calendar, fmt.Sprintf("%-12s%9s", "Fri Jul 31", "0.00")) || !strings.Contains(calendar, fmt.Sprintf("%-12s%9s", "Thu Jul 30", "·")) {
+		t.Fatalf("submission calendar should distinguish zero-hour entries from empty cells:\n%s", calendar)
 	}
 }
 
