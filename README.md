@@ -15,7 +15,7 @@
 - Enter the date, hours, and notes
 - Review an entry before it is sent to ClickTime
 - Add 1–9 whole hours as **quicktime** on an existing time-entry row, replacing a single existing entry when present
-- After saving time on the final weekday of a pay period, optionally jump to timesheet review
+- After saving at least 8 total hours on the final weekday of a pay period, optionally jump to timesheet review
 - Edit an existing entry and confirm the update
 - Submit the ClickTime timesheet containing the selected day for approval
 - Filter client, project, and task pickers
@@ -84,7 +84,7 @@ Running without `CLICKTIME_TOKEN` exits with an error before the TUI starts.
 - The confirmation screen shows ClickTime's full period, status, and total hours.
 - Submission is offered only when ClickTime reports `Submit` as an available action.
 - Press `y` or `enter` to attest that the timesheet is accurate and submit the entire period for approval; `b` or `esc` cancels.
-- When saving an entry on the period's final weekday, tuitime asks whether to review that period for submission; press `y` or `enter` to continue, or `n`, `b`, or `esc` to remain in the weekly view.
+- When saving an entry on the period's final weekday, tuitime asks whether to review that period for submission once the day's total across all rows reaches at least 8 hours; press `y` or `enter` to continue, or `n`, `b`, or `esc` to remain in the weekly view.
 
 ## Development
 

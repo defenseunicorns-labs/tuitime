@@ -1211,6 +1211,7 @@ func TestSaveOnLastPayPeriodWeekdayOffersTimesheetReview(t *testing.T) {
 	}
 	updated, _ = refreshing.Update(entriesMsg{
 		week:       refreshing.weekStart,
+		entries:    []clicktime.TimeEntry{{Date: "2026-07-31", Hours: 8}},
 		timesheets: []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-08-02"}}, // Sunday
 	})
 	prompt := updated.(Model)
@@ -1230,6 +1231,79 @@ func TestSaveOnLastPayPeriodWeekdayOffersTimesheetReview(t *testing.T) {
 	updated, _ = prompt.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if declined := updated.(Model); declined.screen != screenDashboard {
 		t.Fatalf("declining prompt: screen = %v, want dashboard", declined.screen)
+	}
+}
+
+func TestTimesheetReviewPromptWaitsForDailyTotal(t *testing.T) {
+	t.Parallel()
+	date := time.Date(2026, time.July, 31, 0, 0, 0, 0, time.UTC)
+	model := NewAt(nil, func() time.Time { return date })
+	model.draft = draft{date: date.Format(time.DateOnly)}
+
+	entries := []clicktime.TimeEntry{
+		{Date: "2026-07-30", Hours: 8, JobID: "other-day"},
+	}
+	for index, hours := range []clicktime.Number{2, 3, 3} {
+		entries = append(entries, clicktime.TimeEntry{
+			Date: "2026-07-31", Hours: hours, JobID: fmt.Sprintf("project-%d", index),
+		})
+		updated, _ := model.Update(savedMsg{})
+		model = updated.(Model)
+		updated, _ = model.Update(entriesMsg{
+			week:       model.weekStart,
+			entries:    entries,
+			timesheets: []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-08-02"}},
+		})
+		model = updated.(Model)
+		want := screenDashboard
+		if index == 2 {
+			want = screenTimesheetPrompt
+		}
+		if model.screen != want {
+			t.Fatalf("after saving row %d (daily total %.2f): screen = %v, want %v", index+1, model.totalForDate(date), model.screen, want)
+		}
+	}
+}
+
+func TestTimesheetReviewPromptDailyHoursThreshold(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		date    string
+		hours   clicktime.Number
+		timeOff clicktime.Number
+		want    screen
+	}{
+		{name: "below eight", date: "2026-07-31", hours: 7.99, want: screenDashboard},
+		{name: "exactly eight", date: "2026-07-31", hours: 8, want: screenTimesheetPrompt},
+		{name: "above eight", date: "2026-07-31", hours: 9, want: screenTimesheetPrompt},
+		{name: "work and time off", date: "2026-07-31", hours: 4, timeOff: 4, want: screenTimesheetPrompt},
+		{name: "earlier weekday", date: "2026-07-30", hours: 8, want: screenDashboard},
+		{name: "weekend period end", date: "2026-08-02", hours: 8, want: screenDashboard},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			date, err := time.Parse(time.DateOnly, test.date)
+			if err != nil {
+				t.Fatal(err)
+			}
+			model := NewAt(nil, func() time.Time { return date })
+			model.draft = draft{date: test.date}
+			// The refreshed total must replace the pre-save total, including edits downward.
+			model.entries = []clicktime.TimeEntry{{Date: test.date, Hours: 8}}
+			updated, _ := model.Update(savedMsg{})
+			model = updated.(Model)
+			updated, _ = model.Update(entriesMsg{
+				week:           model.weekStart,
+				entries:        []clicktime.TimeEntry{{Date: test.date, Hours: test.hours}},
+				timeOffEntries: []clicktime.TimeOffEntry{{Date: test.date, Hours: test.timeOff}},
+				timesheets:     []clicktime.Timesheet{{ID: "sheet-1", EndDate: "2026-08-02"}},
+			})
+			if got := updated.(Model); got.screen != test.want {
+				t.Fatalf("screen = %v, want %v (daily total %.2f)", got.screen, test.want, got.totalForDate(date))
+			}
+		})
 	}
 }
 

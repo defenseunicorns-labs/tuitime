@@ -377,7 +377,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingWeek = time.Time{}
 		m.pendingDayCursor = nil
 		m.loadingText = ""
-		if m.promptForTimesheetReview && m.isLastWeekdayOfTimesheet(m.promptTimesheetDate) {
+		if m.promptForTimesheetReview && m.isLastWeekdayOfTimesheet(m.promptTimesheetDate) && m.totalForDate(m.promptTimesheetDate) >= 8 {
 			m.screen = screenTimesheetPrompt
 		}
 		m.promptForTimesheetReview = false
